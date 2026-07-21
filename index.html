@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sistema de Vencimientos — SpecialCar</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div id="app">
+
+  <!-- HEADER -->
+  <header class="header">
+    <div class="header-content">
+      <div class="logo-area">
+        <div class="logo-icon">SC</div>
+        <div>
+          <h1>SpecialCar</h1>
+          <p>Control de Vencimientos Documentales</p>
+        </div>
+      </div>
+      <nav class="main-nav">
+        <button class="nav-btn active" onclick="irAVista('dashboard')" id="nav-dashboard">📊 Dashboard</button>
+        <button class="nav-btn" onclick="irAVista('tabla')" id="nav-tabla">📋 Vehículos</button>
+      </nav>
+      <div class="header-actions">
+        <span id="ultima-carga-info" class="ultima-carga-info"></span>
+        <button class="btn btn-outline" onclick="document.getElementById('inputArchivoVenc').click()">📤 Cargar Vencimientos</button>
+        <input type="file" id="inputArchivoVenc" accept=".csv,.xlsx,.xls" style="display:none" onchange="onArchivoVencimientosSeleccionado(event)" />
+        <button class="btn btn-outline" onclick="generarReporteGerencia()">📄 Reporte Gerencia</button>
+        <button class="btn btn-primary" onclick="abrirModalNuevo()">+ Agregar Vehículo</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ====== VISTA DASHBOARD ====== -->
+  <div id="vista-dashboard" class="vista">
+    <div class="dashboard-grid">
+
+      <!-- KPI Cards -->
+      <div class="kpi-row">
+        <div class="kpi-card kpi-total">
+          <div class="kpi-icon">🚗</div>
+          <div class="kpi-info">
+            <div class="kpi-num" id="d-total">0</div>
+            <div class="kpi-label">Total Vehículos</div>
+          </div>
+        </div>
+        <div class="kpi-card kpi-vencido">
+          <div class="kpi-icon">🔴</div>
+          <div class="kpi-info">
+            <div class="kpi-num" id="d-vencidos">0</div>
+            <div class="kpi-label">Vehículos con doc. vencido</div>
+          </div>
+        </div>
+        <div class="kpi-card kpi-alerta">
+          <div class="kpi-icon">🟡</div>
+          <div class="kpi-info">
+            <div class="kpi-num" id="d-alertas">0</div>
+            <div class="kpi-label">Documentos en alerta</div>
+          </div>
+        </div>
+        <div class="kpi-card kpi-vigente">
+          <div class="kpi-icon">🟢</div>
+          <div class="kpi-info">
+            <div class="kpi-num" id="d-vigentes">0</div>
+            <div class="kpi-label">Vehículos al día</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Por documento -->
+      <div class="dash-section">
+        <h3 class="dash-title">Estado por tipo de documento</h3>
+        <div class="doc-status-grid" id="doc-status-grid"></div>
+      </div>
+
+      <!-- Top alertas -->
+      <div class="dash-section">
+        <div class="dash-section-header">
+          <h3 class="dash-title">Vehículos con alertas críticas</h3>
+          <button class="btn btn-sm btn-outline-dark" onclick="notificarTodos()">✉️ Notificar todos</button>
+        </div>
+        <div id="lista-alertas-dashboard"></div>
+      </div>
+
+      <!-- Vencimientos por mes -->
+      <div class="dash-section">
+        <h3 class="dash-title">Próximos vencimientos (6 meses)</h3>
+        <div id="chart-meses" class="chart-bar-container"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ====== VISTA TABLA ====== -->
+  <div id="vista-tabla" class="vista hidden">
+
+    <!-- Filtros -->
+    <div class="filtros-bar">
+      <input type="text" id="buscador" placeholder="🔍 Buscar placa, nombre, empresa..." onkeyup="filtrarTabla()" class="input-search" />
+      <select id="filtroEmpresa" onchange="filtrarTabla()">
+        <option value="">Todas las empresas</option>
+      </select>
+      <select id="filtroSOAT" onchange="filtrarTabla()">
+        <option value="">SOAT: Todos</option>
+        <option value="vencido">Vencido</option>
+        <option value="alerta">En alerta</option>
+        <option value="vigente">Vigente</option>
+      </select>
+      <select id="filtroSeguros" onchange="filtrarTabla()">
+        <option value="">Seguros: Todos</option>
+        <option value="vencido">Vencido</option>
+        <option value="alerta">En alerta</option>
+        <option value="vigente">Vigente</option>
+      </select>
+      <select id="filtroTO" onchange="filtrarTabla()">
+        <option value="">T.Op: Todos</option>
+        <option value="vencido">Vencido</option>
+        <option value="alerta_to">En alerta (3m)</option>
+        <option value="vigente">Vigente</option>
+      </select>
+      <select id="filtroTecno" onchange="filtrarTabla()">
+        <option value="">Tecno: Todos</option>
+        <option value="vencido">Vencido</option>
+        <option value="alerta">En alerta</option>
+        <option value="vigente">Vigente</option>
+      </select>
+      <button class="btn btn-sm btn-clear" onclick="limpiarFiltros()">✕ Limpiar</button>
+    </div>
+
+    <!-- Leyenda -->
+    <div class="leyenda-bar">
+      <span class="ley-item"><span class="dot dot-g"></span>Vigente</span>
+      <span class="ley-item"><span class="dot dot-y"></span>Alerta 1 mes</span>
+      <span class="ley-item"><span class="dot dot-o"></span>T.Op. alerta 3 meses</span>
+      <span class="ley-item"><span class="dot dot-r"></span>Vencido</span>
+      <span class="ley-sep"></span>
+      <span id="count-label" class="count-label">0 registros</span>
+      <button class="btn btn-sm btn-outline-dark" onclick="exportarCSV()">📥 CSV</button>
+    </div>
+
+    <!-- Tabla -->
+    <div class="tabla-wrapper">
+      <div class="tabla-scroll">
+        <table id="tablaVehiculos">
+          <thead>
+            <tr>
+              <th class="th-fix">Placa</th>
+              <th>N° Int.</th>
+              <th>Nombre</th>
+              <th>Empresa</th>
+              <!-- SOAT -->
+              <th class="th-soat">SOAT Vence</th>
+              <th class="th-soat-e">F. Renovación</th>
+              <th class="th-soat-e">Comprobante</th>
+              <!-- Seguros -->
+              <th class="th-seg">Seguros Vence</th>
+              <th class="th-seg-e">F. Renovación</th>
+              <th class="th-seg-e">Comprobante</th>
+              <!-- Tar. Operación -->
+              <th class="th-to">T. Operación Vence</th>
+              <th class="th-to-e">F. Pago TO</th>
+              <th class="th-to-e">Comprobante TO</th>
+              <th class="th-to-e">F. Docs Completos</th>
+              <th class="th-to-e">F. Radicado RUNT</th>
+              <th class="th-to-e">Observación TO</th>
+              <!-- Tecno -->
+              <th class="th-tec">Tecno. Vence</th>
+              <th class="th-tec-e">F. Renovación</th>
+              <th class="th-tec-e">Comprobante</th>
+              <!-- Acciones -->
+              <th class="th-acc">Acciones</th>
+            </tr>
+          </thead>
+          <tbody id="tbodyVehiculos"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- MODAL -->
+<div id="modalDetalle" class="modal-overlay hidden">
+  <div class="modal-box modal-lg">
+    <div class="modal-header">
+      <h2 id="modalTitulo">Agregar Vehículo</h2>
+      <button class="modal-close" onclick="cerrarModal()">✕</button>
+    </div>
+    <div class="modal-body" id="modalContenido"></div>
+    <div class="modal-footer">
+      <button class="btn btn-outline-dark" onclick="cerrarModal()">Cancelar</button>
+      <button class="btn btn-primary" onclick="guardarRegistro()">💾 Guardar</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div id="toast" class="toast hidden"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
