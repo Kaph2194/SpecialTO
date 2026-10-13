@@ -61,12 +61,17 @@ function demoraTO(v){
 // ===== NAVEGACION =====
 function irAVista(v) {
   vistaActual = v;
-  document.getElementById('vista-dashboard').classList.toggle('hidden', v!=='dashboard');
-  document.getElementById('vista-tabla').classList.toggle('hidden', v!=='tabla');
-  document.getElementById('nav-dashboard').classList.toggle('active', v==='dashboard');
-  document.getElementById('nav-tabla').classList.toggle('active', v==='tabla');
+  ['dashboard','tabla','cartera'].forEach(x=>{
+    const vista=document.getElementById('vista-'+x), nav=document.getElementById('nav-'+x);
+    if(vista) vista.classList.toggle('hidden', v!==x);
+    if(nav) nav.classList.toggle('active', v===x);
+  });
+  // Los botones del encabezado (cargar vencimientos, reporte gerencia, agregar vehiculo) son del modulo de vencimientos
+  const accVenc=document.getElementById('header-actions-venc');
+  if(accVenc) accVenc.classList.toggle('acciones-ocultas', v==='cartera');
   if (v==='dashboard') renderDashboard();
   if (v==='tabla') renderTabla();
+  if (v==='cartera' && typeof renderCartera==='function') renderCartera();
 }
 
 // ===== DASHBOARD =====
