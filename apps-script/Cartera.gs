@@ -506,13 +506,19 @@ function formularios_(html) {
   }
   return out;
 }
+// Formulario de INGRESO (no confundir con "Mi Perfil", que tambien tiene un campo de contraseña)
+function esFormLogin_(f, urlPagina) {
+  if (!f.campos.some(c => c.tipo === 'password')) return false;
+  if (f.action) return /login|signin|ingres|iniciar/i.test(f.action);
+  return /login|signin/i.test(urlPagina || '');
+}
 function iniciarSesionPortal_(jar, ruta) {
   ruta = ruta || CONFIG.PORTAL_REPORTE;
   const props = PropertiesService.getScriptProperties();
   const usuario = String(props.getProperty('PORTAL_USUARIO') || '').trim(), clave = String(props.getProperty('PORTAL_CLAVE') || '').replace(/^\s+|\s+$/g, '');
   if (!usuario || !clave) throw new Error('Faltan PORTAL_USUARIO / PORTAL_CLAVE en Propiedades del script');
   let p = pedir_(jar, CONFIG.PORTAL_BASE + ruta);
-  const form = formularios_(p.r.getContentText()).filter(f => f.campos.some(c => c.tipo === 'password'))[0];
+  const form = formularios_(p.r.getContentText()).filter(f => esFormLogin_(f, p.url))[0];
   if (!form) return p; // ya hay sesion
   const datos = {};
   form.campos.forEach(c => { if (c.nombre && c.tipo !== 'submit' && c.tipo !== 'button' && c.tipo !== 'checkbox') datos[c.nombre] = c.valor; });
@@ -524,7 +530,7 @@ function iniciarSesionPortal_(jar, ruta) {
   const recordar = form.campos.filter(c => c.tipo === 'checkbox' && /remember|recordar/i.test(c.nombre || ''))[0];
   if (recordar) datos[recordar.nombre] = 'true';
   p = pedir_(jar, absoluta_(form.action || p.url, p.url), { method: 'post', payload: datos });
-  if (formularios_(p.r.getContentText()).some(f => f.campos.some(c => c.tipo === 'password'))) {
+  if (formularios_(p.r.getContentText()).some(f => esFormLogin_(f, p.url))) {
     const msg = mensajesPortal_(p.r.getContentText());
     throw new Error('El portal rechazó el inicio de sesión' + (msg ? ': "' + msg + '"' : '') + ' (revisa PORTAL_USUARIO / PORTAL_CLAVE o ejecuta diagnosticarLogin)');
   }
