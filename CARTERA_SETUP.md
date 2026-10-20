@@ -65,6 +65,19 @@ El CONSOLIDADO ya no hay que armarlo a mano:
 
 Si la descarga del parque automotor falla, ejecutar **`diagnosticarPortalParque`** y compartir el registro, o poner las URLs exactas de descarga (una por empresa) en `CONFIG.PORTAL_PARQUE_URLS`. Si la ruta del reporte en el portal no es `/Reportes/ParqueAutomotor`, cambiarla en `CONFIG.PORTAL_PARQUE`.
 
+### Gestiones de cobro por placa (trazabilidad)
+
+Cada placa tiene el botón **📞 Gestión** (y la columna **Última gestión**, que también se puede pulsar). Ahí se registra cada contacto, haya o no acuerdo de pago:
+
+- **Registro rápido** de una llamada: *No contestó*, *Buzón de voz*, *Número errado* (un clic; queda con fecha y hora).
+- **Enviar información**: el mensaje con el estado de cuenta (deuda, periodos, último periodo pagado y, si existe, el acuerdo) se puede editar y enviar por **WhatsApp** (se abre con el texto listo) o por **correo desde juridico@**. En ambos casos queda guardado el texto exacto que se envió.
+- **Registrar gestión** completa: fecha y hora, medio (llamada, WhatsApp, SMS, correo, visita, notificación escrita), resultado (no contestó, se compromete a pagar, solicita acuerdo, no puede pagar, no reconoce la deuda, dice que ya pagó…), detalle y **próxima gestión**.
+- La **próxima gestión** aparece en la pestaña **Agenda** y como evento en los calendarios de juridico@ y directortransporte@ (un solo evento pendiente por placa).
+- **Historial** de la placa con todas las gestiones y los seguimientos de sus acuerdos.
+- **Filtros**: nunca gestionadas, sin gestión en 7 días, gestionadas hoy, última sin contacto, última con compromiso.
+- El **informe diario** incluye las gestiones de las últimas 24 horas (por resultado) y la columna *Última gestión*; el CSV también.
+- Todo queda en la pestaña **Gestiones** de la hoja de Google (una fila por contacto) y se ve igual en cualquier navegador.
+
 ### Estado de gestión por placa
 
 Cada placa tiene **Estado**: Activo, Notificado, Desvinculación o Radicado. Al elegir **Radicado** aparece el campo **N° radicado** (se marca en rojo mientras esté vacío). El estado se guarda en la pestaña *EstadosPlaca* de la hoja (con historial de cambios), **no se pierde al cargar un reporte nuevo**, se puede filtrar, y sale en los informes y en el CSV.

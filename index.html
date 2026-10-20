@@ -242,6 +242,10 @@
               <option value="">Acuerdo: todos</option><option value="con">Con acuerdo activo</option><option value="sin">Sin acuerdo</option><option value="incumplido">Acuerdo incumplido</option>
             </select>
             <select id="cFiltroEstado" onchange="renderCartera()"><option value="">Estado: todos</option></select>
+            <select id="cFiltroGestion" onchange="renderTablaCartera()">
+              <option value="">Gestión: todas</option><option value="nunca">Nunca gestionadas</option><option value="sin7">Sin gestión en 7 días</option>
+              <option value="hoy">Gestionadas hoy</option><option value="sincontacto">Última: no contestó / buzón / errado</option><option value="compromiso">Última: se comprometió / pidió acuerdo</option>
+            </select>
             <label class="chk"><input type="checkbox" id="cSoloSaldo" checked onchange="renderTablaCartera()"/> Solo con saldo</label>
             <button class="btn btn-sm btn-clear" onclick="limpiarFiltrosCartera()">✕ Limpiar</button>
             <span class="ley-sep"></span>
@@ -263,6 +267,7 @@
                 <th>Estado</th>
                 <th>Radicado</th>
                 <th>Acuerdo</th>
+                <th>Última gestión</th>
                 <th class="th-acc">Acciones</th>
               </tr></thead>
               <tbody id="tbodyCartera"></tbody>
@@ -335,6 +340,7 @@
 <!-- cartera_data.js (opcional, NO se sube al repositorio publico: contiene datos personales) -->
 <script src="cartera_data.js" onerror="this.remove()"></script>
 <script src="cartera.js"></script>
+<script src="gestiones.js"></script>
 <script src="parque.js"></script>
 </body>
 </html>
