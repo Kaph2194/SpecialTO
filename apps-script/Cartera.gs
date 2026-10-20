@@ -39,7 +39,7 @@ const CONFIG = {
   IMPORTAR_DESDE_DRIVE: true,      // todo Excel/CSV que se guarde en la carpeta de abajo se carga solo
   CARPETA_IMPORTAR: 'SpecialCar Cartera - Cargar aqui',
   IMPORTAR_DESDE_CORREO: true,     // todo correo que llegue a juridico@ con el reporte adjunto se carga solo
-  BUSQUEDA_CORREO: 'has:attachment (filename:xlsx OR filename:xls OR filename:csv) (cartera OR rodamientos OR CarteraRodamientos OR ParqueAutomotor OR "parque automotor" OR consolidado) newer_than:10d -label:cartera-importada',
+  BUSQUEDA_CORREO: 'has:attachment (filename:xlsx OR filename:xls OR filename:csv) (cartera OR rodamientos OR CarteraRodamientos OR ParqueAutomotor OR "parque automotor" OR consolidado) newer_than:10d -label:cartera-importada -from:me -subject:"[CARTERA DIARIA]" -subject:"[ACUERDOS DE PAGO]"',
   // Descarga directa desde el portal SGT. Usuario y clave NO van aqui: se guardan en
   // Configuracion del proyecto > Propiedades del script: PORTAL_USUARIO y PORTAL_CLAVE.
   DESCARGAR_DEL_PORTAL: true,
@@ -345,7 +345,8 @@ function importarCarteraAutomatica(forzarPortal) {
       const etiqueta = GmailApp.getUserLabelByName('cartera-importada') || GmailApp.createLabel('cartera-importada');
       GmailApp.search(CONFIG.BUSQUEDA_CORREO, 0, 20).forEach(hilo => {
         hilo.getMessages().forEach(m => m.getAttachments().forEach(a => {
-          if (/\.(xlsx|xls|csv)$/i.test(a.getName())) { carpeta.createFile(a.copyBlob()).setName(a.getName()); res.correo++; }
+          // los informes que envia este mismo sistema (cartera_AAAA-MM-DD.csv, Informe_*.pdf) no son reportes del portal
+          if (/\.(xlsx|xls|csv)$/i.test(a.getName()) && !/^(cartera_\d{4}-\d{2}-\d{2}|informe_)/i.test(a.getName())) { carpeta.createFile(a.copyBlob()).setName(a.getName()); res.correo++; }
         }));
         hilo.addLabel(etiqueta);
       });
@@ -414,7 +415,7 @@ function leerFilasArchivo_(f) {
   finally { try { DriveApp.getFileById(tmpId).setTrashed(true); } catch (e) {} }
 }
 
-function normalizar_(s) { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim(); }
+function normalizar_(s) { return String(s || '').replace(/\uFEFF/g, '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim(); }
 function mapearCol_(h) {
   h = normalizar_(h);
   if (h.indexOf('placa') >= 0) return 'placa';
@@ -508,7 +509,7 @@ function formularios_(html) {
 function iniciarSesionPortal_(jar, ruta) {
   ruta = ruta || CONFIG.PORTAL_REPORTE;
   const props = PropertiesService.getScriptProperties();
-  const usuario = props.getProperty('PORTAL_USUARIO'), clave = props.getProperty('PORTAL_CLAVE');
+  const usuario = String(props.getProperty('PORTAL_USUARIO') || '').trim(), clave = String(props.getProperty('PORTAL_CLAVE') || '').replace(/^\s+|\s+$/g, '');
   if (!usuario || !clave) throw new Error('Faltan PORTAL_USUARIO / PORTAL_CLAVE en Propiedades del script');
   let p = pedir_(jar, CONFIG.PORTAL_BASE + ruta);
   const form = formularios_(p.r.getContentText()).filter(f => f.campos.some(c => c.tipo === 'password'))[0];
@@ -523,10 +524,46 @@ function iniciarSesionPortal_(jar, ruta) {
   const recordar = form.campos.filter(c => c.tipo === 'checkbox' && /remember|recordar/i.test(c.nombre || ''))[0];
   if (recordar) datos[recordar.nombre] = 'true';
   p = pedir_(jar, absoluta_(form.action || p.url, p.url), { method: 'post', payload: datos });
-  if (formularios_(p.r.getContentText()).some(f => f.campos.some(c => c.tipo === 'password')))
-    throw new Error('El portal rechazó el inicio de sesión (revisa PORTAL_USUARIO / PORTAL_CLAVE)');
+  if (formularios_(p.r.getContentText()).some(f => f.campos.some(c => c.tipo === 'password'))) {
+    const msg = mensajesPortal_(p.r.getContentText());
+    throw new Error('El portal rechazó el inicio de sesión' + (msg ? ': "' + msg + '"' : '') + ' (revisa PORTAL_USUARIO / PORTAL_CLAVE o ejecuta diagnosticarLogin)');
+  }
   return pedir_(jar, CONFIG.PORTAL_BASE + ruta);
 }
+function entidades_(t) {
+  const mapa = { nbsp: ' ', amp: '&', quot: '"', lt: '<', gt: '>', aacute: 'á', eacute: 'é', iacute: 'í', oacute: 'ó', uacute: 'ú', ntilde: 'ñ', Aacute: 'Á', Eacute: 'É', Iacute: 'Í', Oacute: 'Ó', Uacute: 'Ú', Ntilde: 'Ñ', uuml: 'ü', iexcl: '¡', iquest: '¿' };
+  return String(t).replace(/&#(\d+);/g, (x, n) => String.fromCharCode(Number(n))).replace(/&#x([0-9a-f]+);/gi, (x, n) => String.fromCharCode(parseInt(n, 16))).replace(/&([a-zA-Z]+);/g, (x, n) => mapa[n] !== undefined ? mapa[n] : ' ');
+}
+// Textos de error/aviso que muestra el portal (validaciones de ASP.NET, alertas)
+function mensajesPortal_(html) {
+  const out = [], re = /<(div|span|li|p|label)\b[^>]*class\s*=\s*["'][^"']*(validation-summary|field-validation-error|text-danger|alert|error|invalid-feedback)[^"']*["'][^>]*>([\s\S]*?)<\/\1>/gi; let m;
+  while ((m = re.exec(html))) { const t = entidades_(m[3].replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim(); if (t && out.indexOf(t) < 0) out.push(t); }
+  return out.join(' | ').slice(0, 300);
+}
+
+/**
+ * Ejecutar a mano si el portal rechaza el inicio de sesion: muestra como es el
+ * formulario y que responde el portal (NUNCA muestra la contraseña).
+ */
+function diagnosticarLogin() {
+  const props = PropertiesService.getScriptProperties();
+  const u = String(props.getProperty('PORTAL_USUARIO') || ''), c = String(props.getProperty('PORTAL_CLAVE') || '');
+  console.log('PORTAL_USUARIO: "' + u.replace(/^(.{3}).*(@.*)$/, '$1***$2') + '" · largo ' + u.length + (u !== u.trim() ? ' · ¡TIENE ESPACIOS AL INICIO O FINAL!' : '') +
+    ' · PORTAL_CLAVE: largo ' + c.length + (c !== c.trim() ? ' · ¡TIENE ESPACIOS AL INICIO O FINAL!' : ''));
+  const jar = {};
+  const p = pedir_(jar, CONFIG.PORTAL_BASE + CONFIG.PORTAL_REPORTE);
+  const html = p.r.getContentText();
+  console.log('Página de ingreso: ' + p.url + ' · código ' + p.code + ' · cookies: ' + Object.keys(jar).join(', '));
+  formularios_(html).forEach((f, i) => console.log('Formulario ' + i + ': ' + f.metodo.toUpperCase() + ' "' + f.action + '" · campos: ' +
+    f.campos.map(x => x.tipo + ':' + (x.nombre || '(sin nombre)') + (x.tipo === 'hidden' ? '=' + String(x.valor).slice(0, 12) + '…' : '')).join(' | ')));
+  console.log('Scripts: ' + (html.match(/<script[^>]*src=["'][^"']+["']/gi) || []).join(' '));
+  console.log('Recaptcha/captcha en la página: ' + /recaptcha|captcha|hcaptcha/i.test(html));
+  const js = (html.match(/<script\b[^>]*>([\s\S]*?)<\/script>/gi) || []).join('\n');
+  console.log('Llamadas en JS del login: ' + ((js.match(/(fetch|ajax|post|url)\s*[:(]\s*["'][^"']+["']/gi) || []).slice(0, 10).join(' · ') || 'ninguna'));
+  try { iniciarSesionPortal_({}, CONFIG.PORTAL_REPORTE); console.log('RESULTADO: inicio de sesión correcto'); }
+  catch (e) { console.log('RESULTADO: ' + e.message); }
+}
+
 function esExcel_(r) {
   const h = r.getAllHeaders(), ct = String(h['Content-Type'] || h['content-type'] || ''), cd = String(h['Content-Disposition'] || h['content-disposition'] || '');
   return /spreadsheet|excel|octet-stream|csv/i.test(ct) || /\.(xlsx|xls|csv)/i.test(cd);
