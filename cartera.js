@@ -178,6 +178,7 @@ async function cargarCarteraDesdeBackend(forzar){
         guardarAcuerdosLS(); cambio=true;
         soloLocales.filter(x=>!_acuerdosPendientes.has(x.id)).forEach(x=>sincronizarAcuerdo(x));
       }
+      if(Array.isArray(r.gestiones)&&typeof aplicarGestionesBackend==='function'){ aplicarGestionesBackend(r.gestiones); cambio=true; }
       if(r.estados&&typeof r.estados==='object'){
         const locales=estadosPlaca; estadosPlaca={...r.estados};
         _estadosPendientes.forEach(p=>{ if(locales[p]) estadosPlaca[p]=locales[p]; });
@@ -302,7 +303,8 @@ function renderCartera(){
   document.getElementById('c-acuerdos').textContent=activos.length;
   document.getElementById('c-acuerdos-sub').textContent=`${fmtCOP(valorAcuerdos)} por recaudar`;
   document.getElementById('c-incumplidos').textContent=incumplidos;
-  document.getElementById('c-hoy-sub').textContent=`${hoyItems} gestión(es) agendada(s) para hoy`;
+  const gestHoy=typeof gestiones!=='undefined'?gestiones.filter(g=>String(g.fecha).slice(0,10)===hoyISO()||new Date(g.fecha).toDateString()===new Date().toDateString()).length:0;
+  document.getElementById('c-hoy-sub').textContent=`${hoyItems} pendiente(s) en agenda hoy · ${gestHoy} gestión(es) registrada(s) hoy`;
   document.getElementById('cartera-corte').textContent=cartera.fechaCorte?`Corte de cartera: ${fmtD(cartera.fechaCorte)} · ${cartera.archivo||''}`:'Sin archivo de cartera cargado';
   const diasCorte=cartera.fechaCorte?-diasR(cartera.fechaCorte):null;
   document.getElementById('cartera-corte').classList.toggle('corte-viejo',diasCorte!==null&&diasCorte>1);
@@ -355,7 +357,7 @@ function cargarEmpresasCartera(){
 function filtrarCarteraEmpresa(e){ carteraTab='placas'; document.getElementById('cFiltroEmpresa').value=e; renderCartera(); }
 function filtrarCarteraRango(k){ carteraTab='placas'; const s=document.getElementById('cFiltroRango'); s.value=s.value===k?'':k; if(k==='al_dia'&&s.value) document.getElementById('cSoloSaldo').checked=false; renderCartera(); }
 function filtrarCarteraEstado(k){ carteraTab='placas'; const s=document.getElementById('cFiltroEstado'); s.value=s.value===k?'':k; if(s.value) document.getElementById('cSoloSaldo').checked=false; renderCartera(); }
-function limpiarFiltrosCartera(){ ['cBuscador','cFiltroEmpresa','cFiltroRango','cFiltroAcuerdo','cFiltroEstado'].forEach(id=>document.getElementById(id).value=''); document.getElementById('cSoloSaldo').checked=true; renderCartera(); }
+function limpiarFiltrosCartera(){ ['cBuscador','cFiltroEmpresa','cFiltroRango','cFiltroAcuerdo','cFiltroEstado','cFiltroGestion'].forEach(id=>document.getElementById(id).value=''); document.getElementById('cSoloSaldo').checked=true; renderCartera(); }
 function ordenarCartera(campo){ carteraOrden = carteraOrden.campo===campo?{campo,dir:-carteraOrden.dir}:{campo,dir:campo==='placa'||campo==='nombre'||campo==='empresa'?1:-1}; renderTablaCartera(); }
 
 function aplicarFiltrosCartera(){
@@ -363,6 +365,7 @@ function aplicarFiltrosCartera(){
   const emp=document.getElementById('cFiltroEmpresa').value;
   const rango=document.getElementById('cFiltroRango').value;
   const fa=document.getElementById('cFiltroAcuerdo').value;
+  const fg=document.getElementById('cFiltroGestion').value;
   const solo=document.getElementById('cSoloSaldo').checked;
   const fest=document.getElementById('cFiltroEstado').value;
   const {campo,dir}=carteraOrden;
@@ -372,6 +375,7 @@ function aplicarFiltrosCartera(){
     if(emp&&r.empresa!==emp) return false;
     if(rango&&rangoMora(r.periodosVencidos)!==rango) return false;
     if(fest&&estadoPlacaDe(r.placa)!==fest) return false;
+    if(fg&&typeof filtroGestionOK==='function'&&!filtroGestionOK(r.placa,fg)) return false;
     if(fa){ const ac=acuerdoActivoDePlaca(r.placa); if(fa==='con'&&!ac) return false; if(fa==='sin'&&ac) return false; if(fa==='incumplido'&&!(ac&&estadoAcuerdo(ac)==='incumplido')) return false; }
     return true;
   }).sort((a,b)=>{ const x=a[campo],y=b[campo]; return (typeof x==='number'?x-y:String(x).localeCompare(String(y)))*dir; });
@@ -383,8 +387,8 @@ function renderTablaCartera(){
   document.getElementById('c-count').textContent=`${carteraFiltrada.length} placas · ${fmtCOP(tot)}`;
   document.querySelectorAll('#tablaCartera th[data-ord]').forEach(th=>{ th.classList.toggle('ord-activo',th.dataset.ord===carteraOrden.campo); th.dataset.dir=carteraOrden.dir>0?'▲':'▼'; });
   const tb=document.getElementById('tbodyCartera');
-  if(!cartera.registros.length){ tb.innerHTML=`<tr><td colspan="13" class="empty-msg">No hay cartera cargada.<br><br><button class="btn btn-dark" onclick="document.getElementById('inputArchivoCartera').click()">📤 Cargar archivo CarteraRodamientos</button></td></tr>`; return; }
-  if(!carteraFiltrada.length){ tb.innerHTML='<tr><td colspan="13" class="empty-msg">Sin resultados</td></tr>'; return; }
+  if(!cartera.registros.length){ tb.innerHTML=`<tr><td colspan="14" class="empty-msg">No hay cartera cargada.<br><br><button class="btn btn-dark" onclick="document.getElementById('inputArchivoCartera').click()">📤 Cargar archivo CarteraRodamientos</button></td></tr>`; return; }
+  if(!carteraFiltrada.length){ tb.innerHTML='<tr><td colspan="14" class="empty-msg">Sin resultados</td></tr>'; return; }
   tb.innerHTML=carteraFiltrada.map(r=>{
     const k=rangoMora(r.periodosVencidos), ac=acuerdoActivoDePlaca(r.placa);
     const e=ac?estadoAcuerdo(ac):null;
@@ -403,8 +407,10 @@ function renderTablaCartera(){
       <td class="td-estado"><select class="sel-estado ${ESTADOS_PLACA[estadoPlacaDe(r.placa)].c}" onchange="cambiarEstadoPlaca('${esc(r.placa)}',this.value)" title="${estadosPlaca[r.placa]&&estadosPlaca[r.placa].fecha?'Cambiado '+esc(new Date(estadosPlaca[r.placa].fecha).toLocaleString('es-CO')):''}">${Object.entries(ESTADOS_PLACA).map(([k,o])=>`<option value="${k}" ${estadoPlacaDe(r.placa)===k?'selected':''}>${o.t}</option>`).join('')}</select></td>
       <td class="td-radicado">${estadoPlacaDe(r.placa)==='radicado'?`<input id="rad_${esc(r.placa)}" class="inp-radicado ${radicadoDe(r.placa)?'':'rad-falta'}" placeholder="N° radicado" value="${esc(radicadoDe(r.placa))}" onchange="cambiarRadicado('${esc(r.placa)}',this.value)"/>`:'<span class="cell-n">—</span>'}</td>
       <td style="text-align:center">${acTxt}</td>
+      <td class="td-gestion" onclick="abrirGestion('${esc(r.placa)}')">${typeof celdaUltimaGestion==='function'?celdaUltimaGestion(r.placa):''}</td>
       <td class="td-acc">
-        ${ac?`<button class="btn-notif" onclick="abrirSeguimiento('${ac.id}')">Seguimiento</button>`:(r.valorVencido>0?`<button class="btn-notif btn-acuerdo" onclick="abrirNuevoAcuerdo('${esc(r.placa)}')">+ Acuerdo</button>`:'')}
+        <button class="btn-notif btn-gestion" onclick="abrirGestion('${esc(r.placa)}')" title="Registrar llamada, mensaje, correo…">📞 Gestión</button>
+        ${ac?`<button class="btn-notif" onclick="abrirSeguimiento('${ac.id}')">Acuerdo</button>`:(r.valorVencido>0?`<button class="btn-notif btn-acuerdo" onclick="abrirNuevoAcuerdo('${esc(r.placa)}')">+ Acuerdo</button>`:'')}
       </td>
     </tr>`;
   }).join('');
@@ -462,6 +468,7 @@ function itemsAgenda(){
     const ps=totalesAcuerdo(a).proximoSeguimiento;
     if(ps) items.push({tipo:'seguimiento',fecha:ps,a,txt:'Seguimiento programado'});
   });
+  if(typeof itemsAgendaGestiones==='function') itemsAgendaGestiones().forEach(i=>items.push(i));
   return items.sort((x,y)=>x.fecha.localeCompare(y.fecha));
 }
 function renderAgenda(){
@@ -476,7 +483,13 @@ function renderAgenda(){
     const tit=k==='__vencidos'?'⚠️ Vencidos / pendientes de días anteriores':(k===hoyISO()?`Hoy · ${fmtD(k)}`:(t=>t.charAt(0).toUpperCase()+t.slice(1))(new Date(k+'T00:00:00').toLocaleDateString('es-CO',{weekday:'long',day:'2-digit',month:'long',year:'numeric'})));
     return `<div class="agenda-dia ${k==='__vencidos'?'agenda-venc':k===hoyISO()?'agenda-hoy':''}">
       <div class="agenda-tit">${tit}<span>${grupos[k].length}</span></div>
-      ${grupos[k].map(i=>`<div class="agenda-item" onclick="abrirSeguimiento('${i.a.id}')">
+      ${grupos[k].map(i=>i.tipo==='gestion'?`<div class="agenda-item" onclick="abrirGestion('${esc(i.placa)}')">
+        <span class="agenda-ico">☎️</span>
+        <span class="alerta-placa">${esc(i.placa)}</span>
+        <span class="alerta-nombre">${esc(i.nombre)}</span>
+        <span class="agenda-txt">${k==='__vencidos'?`${fmtD(i.fecha)} · `:''}${esc(i.txt)}</span>
+        <span class="cell-doc cell-b">Cobro</span>
+      </div>`:`<div class="agenda-item" onclick="abrirSeguimiento('${i.a.id}')">
         <span class="agenda-ico">${i.tipo==='cuota'?'💰':'📞'}</span>
         <span class="alerta-placa">${esc(i.a.placa)}</span>
         <span class="alerta-nombre">${esc(i.a.nombre)}</span>
@@ -642,6 +655,7 @@ function abrirSeguimiento(id){
   <div class="form-grid form-grid-3">
     <div class="form-group"><label>Fecha gestión</label><input type="date" id="sg_fecha" value="${hoyISO()}"/></div>
     <div class="form-group"><label>Medio</label><select id="sg_tipo"><option>Llamada</option><option>WhatsApp</option><option>Correo</option><option>Visita / presencial</option><option>Otro</option></select></div>
+    <div class="form-group"><label>Resultado</label><select id="sg_resultado"><option value="">— Selecciona —</option>${(typeof RESULTADOS_GESTION!=='undefined'?RESULTADOS_GESTION:[]).map(o=>`<option>${o.t}</option>`).join('')}</select></div>
     <div class="form-group"><label>Próximo seguimiento</label><input type="date" id="sg_prox" value="${sumarPeriodo(hoyISO(),'semanal',1)}"/></div>
   </div>
   <div class="form-group" style="margin-top:10px"><label>Resultado / compromiso del afiliado</label><textarea id="sg_nota" rows="2" placeholder="Ej: contestó, confirma pago de la cuota el viernes por transferencia"></textarea></div>`:''}
@@ -674,7 +688,7 @@ function guardarSeguimiento(acId){
   const prox=document.getElementById('sg_prox').value||null;
   if(!nota&&!prox){ mostrarToast('Escribe el resultado de la gestión o una próxima fecha','error'); return; }
   a.seguimientos=a.seguimientos||[];
-  a.seguimientos.push({id:uid('SG'),fecha:document.getElementById('sg_fecha').value||hoyISO(),tipo:document.getElementById('sg_tipo').value,nota,proximaFecha:prox,usuario:CARTERA_CORREOS.cartera,creado:new Date().toISOString()});
+  a.seguimientos.push({id:uid('SG'),fecha:document.getElementById('sg_fecha').value||hoyISO(),tipo:document.getElementById('sg_tipo').value,resultado:(document.getElementById('sg_resultado')||{}).value||'',nota,proximaFecha:prox,usuario:CARTERA_CORREOS.cartera,creado:new Date().toISOString()});
   a.actualizado=new Date().toISOString();
   mostrarToast('Seguimiento registrado','success');
   cerrarModalCartera(); renderCartera(); sincronizarAcuerdo(a);
@@ -778,8 +792,13 @@ function htmlInformeCartera(){
   <h2>Resumen por empresa</h2><table><thead><tr><th>Empresa</th><th>Placas</th><th style="text-align:right">Valor vencido</th></tr></thead><tbody>
   ${d.porEmp.map(([e,o])=>`<tr><td>${esc(e)}</td><td>${o.n}</td><td style="text-align:right">${fmtCOP(o.v)}</td></tr>`).join('')}
   <tr><td><b>TOTAL</b></td><td><b>${d.conSaldo.length}</b></td><td style="text-align:right"><b>${fmtCOP(d.total)}</b></td></tr></tbody></table>
-  <h2>Detalle por placa (${d.conSaldo.length})</h2><table><thead><tr><th>Placa</th><th>Afiliado</th><th>Empresa</th><th>Último periodo pago</th><th># Per.</th><th style="text-align:right">Valor vencido</th><th>Estado</th><th>Acuerdo</th></tr></thead><tbody>
-  ${d.conSaldo.map(r=>{const ac=acuerdoActivoDePlaca(r.placa);return `<tr><td><b>${esc(r.placa)}</b></td><td>${esc(r.nombre)}</td><td>${esc(r.empresa)}</td><td>${esc(r.ultimoPeriodo)}</td><td>${r.periodosVencidos}</td><td style="text-align:right">${fmtCOP(r.valorVencido)}</td><td>${esc(textoEstadoPlaca(r.placa))}</td><td>${ac?ESTADO_AC[estadoAcuerdo(ac)].t:'—'}</td></tr>`;}).join('')}
+  ${(()=>{ if(typeof gestiones==='undefined') return ''; const desde=Date.now()-86400000; const ult=gestiones.filter(g=>new Date(g.fecha).getTime()>=desde).sort((a,b)=>String(b.fecha).localeCompare(String(a.fecha)));
+    const cnt={}; ult.forEach(g=>cnt[g.resultado]=(cnt[g.resultado]||0)+1);
+    const sinGest=d.conSaldo.filter(r=>filtroGestionOK(r.placa,'sin7')).length;
+    return `<h2>Gestiones de cobro de las últimas 24 horas (${ult.length})</h2><p class="sub">${Object.entries(cnt).map(([k,v])=>`${esc(k)}: <b>${v}</b>`).join(' · ')||'Ninguna'} — Placas con saldo sin gestión en 7 días: <b>${sinGest}</b></p>`+
+      (ult.length?`<table><thead><tr><th>Fecha</th><th>Placa</th><th>Afiliado</th><th>Medio</th><th>Resultado</th><th>Detalle</th><th>Próxima</th></tr></thead><tbody>${ult.map(g=>`<tr><td>${fmtFechaHora(g.fecha)}</td><td><b>${esc(g.placa)}</b></td><td>${esc(g.nombre)}</td><td>${esc(g.medio)}</td><td>${esc(g.resultado)}</td><td>${esc((g.nota||'').slice(0,90))}</td><td>${g.proximaFecha?fmtD(g.proximaFecha):'—'}</td></tr>`).join('')}</tbody></table>`:''); })()}
+  <h2>Detalle por placa (${d.conSaldo.length})</h2><table><thead><tr><th>Placa</th><th>Afiliado</th><th>Empresa</th><th>Último periodo pago</th><th># Per.</th><th style="text-align:right">Valor vencido</th><th>Estado</th><th>Acuerdo</th><th>Última gestión</th></tr></thead><tbody>
+  ${d.conSaldo.map(r=>{const ac=acuerdoActivoDePlaca(r.placa);return `<tr><td><b>${esc(r.placa)}</b></td><td>${esc(r.nombre)}</td><td>${esc(r.empresa)}</td><td>${esc(r.ultimoPeriodo)}</td><td>${r.periodosVencidos}</td><td style="text-align:right">${fmtCOP(r.valorVencido)}</td><td>${esc(textoEstadoPlaca(r.placa))}</td><td>${ac?ESTADO_AC[estadoAcuerdo(ac)].t:'—'}</td><td>${(u=>u?`${fmtFechaHora(u.fecha)} · ${esc(u.resultado)}`:'Sin gestión')(typeof ultimaGestion==='function'?ultimaGestion(r.placa):null)}</td></tr>`;}).join('')}
   </tbody></table>`;
 }
 function htmlInformeAcuerdos(){
@@ -843,8 +862,8 @@ async function enviarInforme(tipo){
 
 // ===== CSV =====
 function exportarCarteraCSV(){
-  const cols=['Placa','N Interno','Identificacion','Afiliado','Celular','Correo','Empresa','Clase','Ultimo periodo pago','# Periodos vencidos','$ Valor vencido','Estado','N Radicado','Acuerdo','Saldo acuerdo','Proximo compromiso'];
-  const rows=(carteraFiltrada.length?carteraFiltrada:cartera.registros).map(r=>{const ac=acuerdoActivoDePlaca(r.placa),t=ac&&totalesAcuerdo(ac);return [r.placa,r.numInterno,r.identificacion,r.nombre,r.celular,r.correo,r.empresa,r.clase,r.ultimoPeriodo,r.periodosVencidos,r.valorVencido,ESTADOS_PLACA[estadoPlacaDe(r.placa)].t,radicadoDe(r.placa),ac?ESTADO_AC[estadoAcuerdo(ac)].t:'',t?t.saldo:'',t&&t.proximo?t.proximo.fecha:''];});
+  const cols=['Placa','N Interno','Identificacion','Afiliado','Celular','Correo','Empresa','Clase','Ultimo periodo pago','# Periodos vencidos','$ Valor vencido','Estado','N Radicado','Acuerdo','Saldo acuerdo','Proximo compromiso','Ultima gestion','Resultado ultima gestion','N gestiones'];
+  const rows=(carteraFiltrada.length?carteraFiltrada:cartera.registros).map(r=>{const ac=acuerdoActivoDePlaca(r.placa),t=ac&&totalesAcuerdo(ac);return [r.placa,r.numInterno,r.identificacion,r.nombre,r.celular,r.correo,r.empresa,r.clase,r.ultimoPeriodo,r.periodosVencidos,r.valorVencido,ESTADOS_PLACA[estadoPlacaDe(r.placa)].t,radicadoDe(r.placa),ac?ESTADO_AC[estadoAcuerdo(ac)].t:'',t?t.saldo:'',t&&t.proximo?t.proximo.fecha:'',...(u=>[u?fmtFechaHora(u.fecha):'',u?u.resultado:'',gestionesDePlaca(r.placa).length])(ultimaGestion(r.placa))];});
   const csv=[cols,...rows].map(r=>r.map(c=>`"${String(c??'').replace(/"/g,'""')}"`).join(';')).join('\n');
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'})); a.download=`cartera_${hoyISO()}.csv`; a.click();
   mostrarToast('CSV de cartera exportado','success');

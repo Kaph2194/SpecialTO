@@ -73,6 +73,8 @@ function doPost(e) {
       case 'ping':                 return json_({ ok: true, cuenta: Session.getEffectiveUser().getEmail(), disparador: disparador, placas: leerCartera_().length, hoja: libro_().getUrl(), carpeta: urlCarpetaImportar_() });
       case 'obtenerCartera':       return json_(obtenerTodo_(p));
       case 'guardarEstadoPlaca':   return json_(guardarEstadoPlaca_(p));
+      case 'guardarGestion':       return json_(guardarGestion_(p.gestion));
+      case 'enviarCorreoAfiliado': return json_(enviarCorreoAfiliado_(p));
       case 'importarAhora':        return json_(importarCarteraAutomatica(true));
       case 'obtenerParque':        return json_(obtenerParque_(p));
       case 'guardarParque':        return json_(guardarParque_(p.tablas || [], p.origen || 'Carga manual en la app'));
@@ -223,7 +225,7 @@ function escribirCompromisos_() {
   acs.forEach(a => {
     (a.compromisos || []).forEach((c, i) => filas.push([c.fecha, 'Cuota', a.placa, a.nombre, 'Cuota ' + (i + 1) + '/' + a.compromisos.length, Number(c.valor) || 0,
       a.estado === 'anulado' ? 'Anulado' : c.pagado ? 'Pagada' : (c.fecha < hoyISO_() ? 'Vencida' : 'Pendiente'), c.fechaPago || '', c.pagado ? Number(c.valorPagado || c.valor) : '', a.id]));
-    (a.seguimientos || []).forEach(s => filas.push([s.fecha, 'Seguimiento (' + (s.tipo || '') + ')', a.placa, a.nombre, s.nota || '', '', s.proximaFecha ? 'Proximo: ' + s.proximaFecha : '', '', '', a.id]));
+    (a.seguimientos || []).forEach(s => filas.push([s.fecha, 'Seguimiento (' + (s.tipo || '') + ')', a.placa, a.nombre, (s.resultado ? s.resultado + ' — ' : '') + (s.nota || ''), '', s.proximaFecha ? 'Proximo: ' + s.proximaFecha : '', '', '', a.id]));
   });
   filas.sort((x, y) => String(x[0]).localeCompare(String(y[0])));
   if (filas.length) h.getRange(2, 1, filas.length, 10).setValues(filas);
@@ -239,7 +241,7 @@ function obtenerTodo_(p) {
   if (p && p.version && p.version === version) return { sinCambios: true, version: version };
   return { version: version, fechaCorte: props.getProperty('CARTERA_CORTE'), archivo: props.getProperty('CARTERA_ARCHIVO'),
     cargado: props.getProperty('CARTERA_CARGA'), origen: props.getProperty('CARTERA_ORIGEN'),
-    registros: leerCartera_(), acuerdos: leerAcuerdos_(), estados: leerEstados_(), cuenta: Session.getEffectiveUser().getEmail(),
+    registros: leerCartera_(), acuerdos: leerAcuerdos_(), estados: leerEstados_(), gestiones: leerGestiones_(), cuenta: Session.getEffectiveUser().getEmail(),
     carpeta: props.getProperty('CARPETA_IMPORTAR_URL') || '' };
 }
 
@@ -281,6 +283,58 @@ function guardarEstadoPlaca_(p) {
     tocarVersion_();
     return { ok: true, placa: placa, estado: { estado: estado, radicado: radicado, fecha: ahora.toISOString(), usuario: usuario } };
   } finally { lock.releaseLock(); }
+}
+
+
+// ===================== GESTIONES DE COBRO (trazabilidad por placa) =====================
+// Una fila por contacto: llamada sin respuesta, mensaje/correo enviado (con el texto),
+// compromiso del afiliado, etc. La proxima gestion se agenda en los calendarios.
+const ENC_GESTIONES = ['ID', 'Fecha', 'Placa', 'Afiliado', 'Empresa', 'Medio', 'Resultado', 'Detalle', 'Información enviada', 'Deuda al gestionar', 'Periodos vencidos', 'Próxima gestión', 'Usuario', 'Registrado', 'EventoId'];
+function leerGestiones_() {
+  const h = hoja_('Gestiones', ENC_GESTIONES);
+  const n = h.getLastRow() - 1;
+  if (n < 1) return [];
+  const iso = v => v instanceof Date ? v.toISOString() : String(v || '');
+  return h.getRange(2, 1, n, ENC_GESTIONES.length).getValues().filter(f => f[0]).map(f => ({
+    id: String(f[0]), fecha: iso(f[1]), placa: String(f[2]).toUpperCase(), nombre: String(f[3] || ''), empresa: String(f[4] || ''), medio: String(f[5] || ''),
+    resultado: String(f[6] || ''), nota: String(f[7] || ''), mensaje: String(f[8] || ''), valorDeuda: Number(f[9]) || 0, periodos: Number(f[10]) || 0,
+    proximaFecha: f[11] instanceof Date ? Utilities.formatDate(f[11], CONFIG.ZONA, 'yyyy-MM-dd') : String(f[11] || ''), usuario: String(f[12] || ''), creado: iso(f[13]), eventId: String(f[14] || '') }));
+}
+function guardarGestion_(g) {
+  if (!g || !g.id || !g.placa || !g.resultado) throw new Error('Gestión inválida');
+  const lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    const h = hoja_('Gestiones', ENC_GESTIONES);
+    const n = h.getLastRow() - 1;
+    const filas = n > 0 ? h.getRange(2, 1, n, ENC_GESTIONES.length).getValues() : [];
+    if (filas.some(f => String(f[0]) === g.id)) return { ok: true, duplicada: true };
+    const placa = String(g.placa).toUpperCase();
+    // la proxima gestion reemplaza a la anterior pendiente de esa placa en el calendario
+    const cal = calendario_();
+    filas.forEach((f, i) => { if (String(f[2]).toUpperCase() === placa && f[14]) { borrarEvento_(cal, String(f[14])); h.getRange(i + 2, 15).setValue(''); } });
+    let eventId = '';
+    if (g.proximaFecha) {
+      try {
+        const desc = 'Afiliado: ' + (g.nombre || '') + '\nEmpresa: ' + (g.empresa || '') + '\nDeuda: ' + cop_(g.valorDeuda) + ' (' + (g.periodos || 0) + ' periodos)' +
+          '\n\nÚltima gestión (' + (g.medio || '') + '): ' + g.resultado + (g.nota ? '\n' + g.nota : '') + '\nRegistrada por: ' + (g.usuario || CONFIG.CORREO_CARTERA);
+        eventId = upsertEvento_(cal, null, String(g.proximaFecha).slice(0, 10), '☎️ Gestión de cobro ' + placa + ' · ' + (g.nombre || ''), desc);
+      } catch (e) { console.warn('Evento gestion ' + placa, e); }
+    }
+    h.appendRow([g.id, g.fecha ? new Date(g.fecha) : new Date(), placa, g.nombre || '', g.empresa || '', g.medio || '', g.resultado, g.nota || '', g.mensaje || '',
+      Number(g.valorDeuda) || 0, Number(g.periodos) || 0, g.proximaFecha || '', g.usuario || CONFIG.CORREO_CARTERA, new Date(), eventId]);
+    tocarVersion_();
+    return { ok: true, gestion: Object.assign({}, g, { placa: placa, eventId: eventId }) };
+  } finally { lock.releaseLock(); }
+}
+/** Envia el estado de cuenta al afiliado desde juridico@ y lo deja registrado como gestion. */
+function enviarCorreoAfiliado_(p) {
+  const para = String(p.para || '').trim();
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(para)) throw new Error('Correo del afiliado inválido: ' + para);
+  MailApp.sendEmail(para, String(p.asunto || 'Estado de cuenta - Grupo Special Car'), String(p.cuerpo || ''), { name: CONFIG.NOMBRE_REMITENTE, replyTo: CONFIG.CORREO_CARTERA });
+  const g = p.gestion || {};
+  g.medio = 'Correo'; g.resultado = 'Correo enviado';
+  g.mensaje = 'Para: ' + para + '\nAsunto: ' + (p.asunto || '') + '\n\n' + (p.cuerpo || '');
+  return guardarGestion_(g);
 }
 
 // ===================== LOGICA DE ACUERDOS (igual que en cartera.js) =====================
@@ -951,6 +1005,12 @@ function htmlInformeCartera_(regs, acs, corte, limite) {
   const rangos = [['1 periodo', r => r.periodosVencidos === 1], ['2–3 periodos', r => r.periodosVencidos >= 2 && r.periodosVencidos <= 3], ['4–6 periodos', r => r.periodosVencidos >= 4 && r.periodosVencidos <= 6], ['Más de 6', r => r.periodosVencidos > 6]];
   const diasCorte = corte ? Math.round((fechaLocal_(hoyISO_()) - fechaLocal_(corte)) / 86400000) : null;
   const detalle = limite ? conSaldo.slice(0, limite) : conSaldo;
+  const gestiones = leerGestiones_().sort((a, b) => String(b.fecha).localeCompare(String(a.fecha)));
+  const ultimaG = {}; gestiones.forEach(g => { if (!ultimaG[g.placa]) ultimaG[g.placa] = g; });
+  const desde = Date.now() - 86400000, recientes = gestiones.filter(g => new Date(g.fecha).getTime() >= desde);
+  const porResultado = {}; recientes.forEach(g => porResultado[g.resultado] = (porResultado[g.resultado] || 0) + 1);
+  const sinGestion7 = conSaldo.filter(r => !ultimaG[r.placa] || new Date(ultimaG[r.placa].fecha).getTime() < Date.now() - 7 * 86400000).length;
+  const fh = s => Utilities.formatDate(new Date(s), CONFIG.ZONA, 'dd/MM HH:mm');
   const estados = leerEstados_();
   const est = r => { const e = estados[r.placa]; return e ? ESTADOS_PLACA_[e.estado] + (e.radicado ? ' #' + esc_(e.radicado) : '') : 'Activo'; };
   const porEstado = {}; Object.keys(ESTADOS_PLACA_).forEach(k => porEstado[k] = { n: 0, v: 0 });
@@ -966,9 +1026,13 @@ function htmlInformeCartera_(regs, acs, corte, limite) {
     tabla_(['Estado', 'Placas con saldo', 'Valor'], Object.keys(ESTADOS_PLACA_).map(k => [ESTADOS_PLACA_[k], porEstado[k].n, cop_(porEstado[k].v)]), [2]) +
     '<h2 style="' + S_.h2 + '">Por periodos vencidos</h2>' +
     tabla_(['Rango', 'Placas', 'Valor'], rangos.map(x => { const l = conSaldo.filter(x[1]); return [x[0], l.length, cop_(l.reduce((s, r) => s + r.valorVencido, 0))]; }), [2]) +
+    '<h2 style="' + S_.h2 + '">Gestiones de cobro de las últimas 24 horas (' + recientes.length + ')</h2>' +
+    '<p style="font-size:12px;margin:0 0 8px">' + (Object.keys(porResultado).map(k => esc_(k) + ': <b>' + porResultado[k] + '</b>').join(' · ') || 'Ninguna gestión registrada') + ' — Placas con saldo sin gestión en 7 días: <b>' + sinGestion7 + '</b></p>' +
+    (recientes.length ? tabla_(['Fecha', 'Placa', 'Afiliado', 'Medio', 'Resultado', 'Detalle', 'Próxima'], recientes.slice(0, 60).map(g => [fh(g.fecha), '<b>' + esc_(g.placa) + '</b>', esc_(g.nombre), esc_(g.medio), esc_(g.resultado), esc_(String(g.nota || '').slice(0, 80)), g.proximaFecha ? fmt_(g.proximaFecha) : '—'])) : '') +
     '<h2 style="' + S_.h2 + '">Detalle por placa (' + conSaldo.length + ')' + (detalle.length < conSaldo.length ? ' — se muestran las ' + detalle.length + ' de mayor valor; el detalle completo va en el PDF y el CSV adjuntos' : '') + '</h2>' +
-    tabla_(['Placa', 'Afiliado', 'Empresa', 'Celular', 'Último periodo pago', '# Per.', 'Valor vencido', 'Estado', 'Acuerdo'],
-      detalle.map(r => ['<b>' + esc_(r.placa) + '</b>', esc_(r.nombre), esc_(r.empresa), esc_(r.celular), esc_(r.ultimoPeriodo), r.periodosVencidos, cop_(r.valorVencido), est(r), acPorPlaca[r.placa] ? ESTADOS_[estadoAcuerdo_(acPorPlaca[r.placa])] : '—']), [6]) +
+    tabla_(['Placa', 'Afiliado', 'Empresa', 'Celular', '# Per.', 'Valor vencido', 'Estado', 'Acuerdo', 'Última gestión'],
+      detalle.map(r => ['<b>' + esc_(r.placa) + '</b>', esc_(r.nombre), esc_(r.empresa), esc_(r.celular), r.periodosVencidos, cop_(r.valorVencido), est(r), acPorPlaca[r.placa] ? ESTADOS_[estadoAcuerdo_(acPorPlaca[r.placa])] : '—',
+        ultimaG[r.placa] ? fh(ultimaG[r.placa].fecha) + ' ' + esc_(ultimaG[r.placa].resultado) : 'Sin gestión']), [5]) +
     '<p style="font-size:10px;color:#9ca3af;text-align:center;margin-top:24px">Enviado automáticamente desde ' + CONFIG.CORREO_CARTERA + ' — Sistema de Vencimientos y Cartera SpecialCar — Confidencial</p></div>';
 }
 
