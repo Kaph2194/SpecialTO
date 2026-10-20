@@ -42,7 +42,7 @@ La app ya trae fija la URL del backend, así que **cualquier navegador** muestra
 
 | Qué | Cuándo |
 |---|---|
-| Descarga del reporte del portal SGT y carga en la app | 6:00, 12:00 y 17:00 (`CONFIG.HORAS_PORTAL`), y antes del informe de las 7:00 |
+| Descarga de cartera y parque automotor (todas las empresas) del portal SGT y carga en la app | 6:00, 12:00 y 17:00 (`CONFIG.HORAS_PORTAL`), y antes del informe de las 7:00 |
 | Carga de reportes que lleguen como adjunto al correo de juridico@ | Cada hora |
 | Carga de cualquier Excel que se guarde en la carpeta de Drive **“SpecialCar Cartera - Cargar aqui”** | Cada hora |
 | Botón **🔄 Actualizar desde el portal** en la app | Cuando se pulse |
@@ -50,6 +50,19 @@ La app ya trae fija la URL del backend, así que **cualquier navegador** muestra
 | Eventos en calendarios y correos de acuerdos | Al guardar |
 
 Los archivos ya cargados pasan a la subcarpeta *Procesados*; los que no se pudieron leer, a *Con error*. Si llegan varios, se usa el de fecha de corte más reciente.
+
+### Parque automotor (vencimientos): consolidado automático
+
+El CONSOLIDADO ya no hay que armarlo a mano:
+
+- **Automático:** en las mismas horas, el backend entra al portal, abre el reporte de parque automotor (`CONFIG.PORTAL_PARQUE`, por defecto `/Reportes/ParqueAutomotor`), descarga un Excel **por cada empresa** de la lista del reporte y los une en la pestaña **ParqueAutomotor** de la hoja de Google. Esa pestaña **es el consolidado** (mismas columnas que el CONSOLIDADO.xlsx, más *Actualizado* y *Origen*) y se puede descargar como Excel desde Google Sheets.
+- También se consolidan solos los archivos `ParqueAutomotor_NN.xlsx` o `CONSOLIDADO.xlsx` que lleguen al correo de juridico@ o que se guarden en la carpeta de Drive.
+- **Manual:** **📤 Cargar Vencimientos** ahora permite seleccionar **los 6 archivos a la vez** (o el CONSOLIDADO).
+- Cada archivo reemplaza solo los vehículos de **su empresa**, así que se puede actualizar una empresa sin tocar las demás.
+- La vista de vencimientos se sincroniza en cualquier navegador. Lo que se registra en la tabla (fechas de renovación, pago de T.O., documentos completos, radicado RUNT, observaciones y comprobantes subidos a Drive) también queda compartido (pestaña *GestionVehiculos*).
+- Botón **🔄 Portal** en la cabecera: descarga en el momento parque automotor y cartera.
+
+Si la descarga del parque automotor falla, ejecutar **`diagnosticarPortalParque`** y compartir el registro, o poner las URLs exactas de descarga (una por empresa) en `CONFIG.PORTAL_PARQUE_URLS`. Si la ruta del reporte en el portal no es `/Reportes/ParqueAutomotor`, cambiarla en `CONFIG.PORTAL_PARQUE`.
 
 ### Estado de gestión por placa
 

@@ -27,8 +27,9 @@
       </nav>
       <div class="header-actions" id="header-actions-venc">
         <span id="ultima-carga-info" class="ultima-carga-info"></span>
-        <button class="btn btn-outline" onclick="document.getElementById('inputArchivoVenc').click()">📤 Cargar Vencimientos</button>
-        <input type="file" id="inputArchivoVenc" accept=".csv,.xlsx,.xls" style="display:none" onchange="onArchivoVencimientosSeleccionado(event)" />
+        <button class="btn btn-outline" onclick="document.getElementById('inputArchivoVenc').click()" title="Puedes seleccionar varios archivos ParqueAutomotor (uno por empresa) o el CONSOLIDADO">📤 Cargar Vencimientos</button>
+        <input type="file" id="inputArchivoVenc" accept=".csv,.xlsx,.xls" multiple style="display:none" onchange="onArchivoVencimientosSeleccionado(event)" />
+        <button class="btn btn-outline" onclick="actualizarTodoDesdePortal()" title="Descarga ahora del portal SGT el parque automotor (todas las empresas) y la cartera">🔄 Portal</button>
         <button class="btn btn-outline" onclick="generarReporteGerencia()">📄 Reporte Gerencia</button>
         <button class="btn btn-primary" onclick="abrirModalNuevo()">+ Agregar Vehículo</button>
       </div>
@@ -334,5 +335,6 @@
 <!-- cartera_data.js (opcional, NO se sube al repositorio publico: contiene datos personales) -->
 <script src="cartera_data.js" onerror="this.remove()"></script>
 <script src="cartera.js"></script>
+<script src="parque.js"></script>
 </body>
 </html>
