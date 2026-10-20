@@ -1004,12 +1004,27 @@ function instalarDisparadores() {
  * y prueba la descarga. El resultado queda en el "Registro de ejecucion".
  */
 function configurarTodo() {
+  verificarPermisos();
   console.log(instalarDisparadores());
   console.log('Carpeta de carga automatica: ' + carpetaImportar_().getUrl());
   const props = PropertiesService.getScriptProperties();
   if (!props.getProperty('PORTAL_USUARIO')) console.warn('Falta PORTAL_USUARIO / PORTAL_CLAVE en Propiedades del script: la descarga del portal queda desactivada.');
   console.log('Importacion: ' + JSON.stringify(importarCarteraAutomatica(true)));
   tocarVersion_();
+}
+
+/**
+ * Google ahora deja aceptar los permisos uno por uno; si alguno quedo sin marcar,
+ * el script no vuelve a preguntar solo. Esto obliga a pedir TODOS los que falten
+ * (conexion al portal, Gmail, Drive, Calendar, correo).
+ */
+function verificarPermisos() {
+  const info = ScriptApp.getAuthorizationInfo(ScriptApp.AuthMode.FULL);
+  if (info.getAuthorizationStatus() === ScriptApp.AuthorizationStatus.REQUIRED) {
+    console.warn('Faltan permisos. Si no aparece la ventana, abre este enlace con juridico@ y marca "Seleccionar todo": ' + info.getAuthorizationUrl());
+    ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
+  }
+  console.log('Permisos completos: portal, Gmail, Drive, Calendar y envío de correo.');
 }
 
 /** Prueba manual: envia ambos informes ya mismo. */
