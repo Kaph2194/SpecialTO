@@ -19,7 +19,7 @@
 // URL del Web App de cartera (Apps Script implementado desde juridico@).
 // Se puede pegar aqui (queda para todos los equipos) o desde el boton
 // "⚙️ Conectar" de la vista Cartera (queda guardada en ese navegador).
-const CARTERA_WEBAPP_URL_FIJA = 'https://script.google.com/macros/s/AKfycbwc6qVdLr88KdPxwMb6LXT-wrQJdt6DRw452eq5sVgo0dyiWGMaLL4D4SvtvWKI04jX/exec';
+const CARTERA_WEBAPP_URL_FIJA = 'https://script.google.com/macros/s/AKfycbx6Q374vDrAG6Nvz8yRrAaYwAyJuPeaXlZT3R5aQKbkwGJrmrLATRV57s9vAvALRXk/exec';
 function _urlCarteraGuardada(){ try{ return localStorage.getItem('sc_cartera_url')||''; }catch(e){ return ''; } }
 let CARTERA_WEBAPP_URL = CARTERA_WEBAPP_URL_FIJA.startsWith('https://') ? CARTERA_WEBAPP_URL_FIJA : _urlCarteraGuardada();
 let CARTERA_BACKEND_ACTIVO = /^https:\/\/script\.google(usercontent)?\.com\//.test(CARTERA_WEBAPP_URL);
