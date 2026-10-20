@@ -128,8 +128,11 @@ function cargarCarteraLS(){
 let _pidiendoClave=null;
 async function llamarBackendCartera(payload,_reintento){
   if(!CARTERA_BACKEND_ACTIVO) throw new Error('backend de cartera no configurado');
-  const resp=await fetch(CARTERA_WEBAPP_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({...payload,clave:_claveCartera()})});
+  const claveEnviada=_claveCartera();
+  const resp=await fetch(CARTERA_WEBAPP_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({...payload,clave:claveEnviada})});
   const data=await resp.json();
+  // la clave se escribio mientras esta llamada iba en camino: reintentar sin preguntar
+  if(data&&data.error==='clave invalida'&&_claveCartera()&&_claveCartera()!==claveEnviada) return llamarBackendCartera(payload,_reintento);
   if(data&&data.error==='clave invalida'&&!_reintento){
     // Una sola ventana aunque haya varias llamadas en curso
     _pidiendoClave=_pidiendoClave||new Promise(res=>setTimeout(()=>{
@@ -208,11 +211,15 @@ function sincronizarEstado(placa){
 }
 async function importarDelPortalAhora(){
   if(!CARTERA_BACKEND_ACTIVO){ mostrarToast('Requiere la conexión con el backend','error'); return; }
-  mostrarToast('Buscando el reporte en el portal, el correo y la carpeta… (puede tardar 1 minuto)','info');
+  mostrarToast('Buscando los reportes (cartera y parque automotor) en el portal, el correo y la carpeta… (puede tardar 1–2 minutos)','info');
   try{
     const r=await llamarBackendCartera({accion:'importarAhora'});
     await cargarCarteraDesdeBackend(true);
-    if(r.cargado) mostrarToast(`Cartera actualizada: ${r.cargado.archivo} · corte ${fmtD(r.cargado.fechaCorte)} · ${r.cargado.placas} placas`,'success');
+    if(typeof sincronizarParque==='function') sincronizarParque(true);
+    const partes=[];
+    if(r.cargado) partes.push(`Cartera: corte ${fmtD(r.cargado.fechaCorte)} · ${r.cargado.placas} placas`);
+    if(r.parque) partes.push(`Parque automotor: ${Object.keys(r.parque.empresas||{}).length} empresa(s) · ${r.parque.total} vehículos`);
+    if(partes.length) mostrarToast('Actualizado — '+partes.join(' · ')+(r.errores&&r.errores.length?` (avisos: ${r.errores.length})`:''),'success');
     else mostrarToast(r.errores&&r.errores.length?`No se cargó: ${r.errores[0]}`:'No había reportes nuevos','error');
   }catch(e){ mostrarToast(/desconocida/.test(e.message)?'El backend no tiene la versión nueva: actualiza Cartera.gs':'Error: '+e.message,'error'); }
 }

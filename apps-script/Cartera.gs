@@ -39,7 +39,7 @@ const CONFIG = {
   IMPORTAR_DESDE_DRIVE: true,      // todo Excel/CSV que se guarde en la carpeta de abajo se carga solo
   CARPETA_IMPORTAR: 'SpecialCar Cartera - Cargar aqui',
   IMPORTAR_DESDE_CORREO: true,     // todo correo que llegue a juridico@ con el reporte adjunto se carga solo
-  BUSQUEDA_CORREO: 'has:attachment (filename:xlsx OR filename:xls OR filename:csv) (cartera OR rodamientos OR CarteraRodamientos) newer_than:10d -label:cartera-importada',
+  BUSQUEDA_CORREO: 'has:attachment (filename:xlsx OR filename:xls OR filename:csv) (cartera OR rodamientos OR CarteraRodamientos OR ParqueAutomotor OR "parque automotor" OR consolidado) newer_than:10d -label:cartera-importada',
   // Descarga directa desde el portal SGT. Usuario y clave NO van aqui: se guardan en
   // Configuracion del proyecto > Propiedades del script: PORTAL_USUARIO y PORTAL_CLAVE.
   DESCARGAR_DEL_PORTAL: true,
@@ -47,6 +47,9 @@ const CONFIG = {
   PORTAL_REPORTE: '/Reportes/CarteraRodamiento',
   PORTAL_URL_DESCARGA: '',         // si la deteccion automatica no encuentra el boton de Excel, pegar aqui la URL exacta de descarga
   HORAS_PORTAL: [6, 12, 17],       // horas del dia en que se descarga del portal (la de 6 queda lista para el informe de las 7)
+  // Parque automotor (vencimientos): un reporte por empresa que se consolida solo
+  PORTAL_PARQUE: '/Reportes/ParqueAutomotor',  // pagina del reporte "Listado de parque automotor"
+  PORTAL_PARQUE_URLS: [],          // opcional: URLs exactas de descarga (una por empresa) si la deteccion automatica no las encuentra
   CLAVE: ''                        // NO escribirla aqui: usar la propiedad del script CLAVE_APP (la app la pide una vez por navegador)
 };
 
@@ -67,6 +70,9 @@ function doPost(e) {
       case 'obtenerCartera':       return json_(obtenerTodo_(p));
       case 'guardarEstadoPlaca':   return json_(guardarEstadoPlaca_(p));
       case 'importarAhora':        return json_(importarCarteraAutomatica(true));
+      case 'obtenerParque':        return json_(obtenerParque_(p));
+      case 'guardarParque':        return json_(guardarParque_(p.tablas || [], p.origen || 'Carga manual en la app'));
+      case 'guardarGestionVehiculos': return json_(guardarGestionVehiculos_(p.cambios || []));
       case 'guardarCartera':       return json_(guardarCartera_(p));
       case 'guardarAcuerdo':       return json_(guardarAcuerdo_(p.acuerdo));
       case 'enviarInformeCartera': return json_(enviarInformeCartera());
@@ -321,8 +327,16 @@ function importarCarteraAutomatica(forzarPortal) {
   if (CONFIG.DESCARGAR_DEL_PORTAL && props.getProperty('PORTAL_USUARIO')) {
     const clave = hoyISO_() + '-' + horaActual;
     if (forzarPortal || (CONFIG.HORAS_PORTAL.indexOf(horaActual) >= 0 && props.getProperty('PORTAL_ULTIMA') !== clave)) {
-      try { const blob = descargarDelPortal_(); carpeta.createFile(blob); res.portal = blob.getName(); props.setProperty('PORTAL_ULTIMA', clave); props.deleteProperty('PORTAL_ERROR'); }
-      catch (e) { res.errores.push('Portal: ' + e.message); props.setProperty('PORTAL_ERROR', Utilities.formatDate(new Date(), CONFIG.ZONA, 'yyyy-MM-dd HH:mm') + ' ' + e.message); }
+      const errPortal = [];
+      try { const blob = descargarDelPortal_(); carpeta.createFile(blob); res.portal = blob.getName(); }
+      catch (e) { errPortal.push('Portal (cartera): ' + e.message); }
+      if (CONFIG.PORTAL_PARQUE) {
+        try { const blobs = descargarReportes_(CONFIG.PORTAL_PARQUE, true, CONFIG.PORTAL_PARQUE_URLS, 'ParqueAutomotor'); blobs.forEach(b => carpeta.createFile(b)); res.portalParque = blobs.length; }
+        catch (e) { errPortal.push('Portal (parque automotor): ' + e.message); }
+      }
+      res.errores = res.errores.concat(errPortal);
+      if (res.portal || res.portalParque) props.setProperty('PORTAL_ULTIMA', clave);
+      if (errPortal.length) props.setProperty('PORTAL_ERROR', Utilities.formatDate(new Date(), CONFIG.ZONA, 'yyyy-MM-dd HH:mm') + ' ' + errPortal.join(' / ')); else props.deleteProperty('PORTAL_ERROR');
     }
   }
   // 2) Correo: adjuntos del reporte que lleguen a juridico@
@@ -338,16 +352,22 @@ function importarCarteraAutomatica(forzarPortal) {
     } catch (e) { res.errores.push('Correo: ' + e.message); }
   }
   // 3) Carpeta de Drive (incluye lo que dejaron el portal y el correo)
-  if (CONFIG.IMPORTAR_DESDE_DRIVE || res.portal || res.correo) {
+  if (CONFIG.IMPORTAR_DESDE_DRIVE || res.portal || res.portalParque || res.correo) {
     const procesados = subcarpeta_(carpeta, 'Procesados'), conError = subcarpeta_(carpeta, 'Con error');
     const archivos = [];
     const it = carpeta.getFiles();
     while (it.hasNext()) archivos.push(it.next());
     archivos.sort((a, b) => a.getDateCreated() - b.getDateCreated());
-    let mejor = null;
+    let mejor = null; const parques = [];
     archivos.forEach(f => {
       try {
-        const datos = leerArchivoCartera_(f);
+        const filas = leerFilasArchivo_(f);
+        if (esParque_(filas)) {
+          const t = parsearParque_(filas);
+          if (!t.filas.length) throw new Error('sin placas');
+          parques.push(t); res.archivos++; f.moveTo(procesados); return;
+        }
+        const datos = parsearCartera_(filas);
         if (!datos.registros.length) throw new Error('sin placas');
         res.archivos++;
         if (!mejor || datos.fechaCorte >= mejor.fechaCorte) mejor = Object.assign(datos, { archivo: f.getName() });
@@ -362,20 +382,25 @@ function importarCarteraAutomatica(forzarPortal) {
         res.cargado = { archivo: mejor.archivo, fechaCorte: mejor.fechaCorte, placas: mejor.registros.length };
       } else res.errores.push('Se omitió ' + mejor.archivo + ': su corte (' + mejor.fechaCorte + ') es anterior al cargado (' + actual + ')');
     }
+    if (parques.length) {
+      const origen = res.portalParque ? 'Portal SGT (automático)' : res.correo ? 'Correo juridico@ (automático)' : 'Carpeta de Drive (automático)';
+      res.parque = guardarParque_(parques, origen);
+    }
   }
   console.log(JSON.stringify(res));
   return res;
 }
 
-// Convierte el archivo (xlsx, xls, csv o Google Sheet) en filas y lo interpreta.
-function leerArchivoCartera_(f) {
+function leerArchivoCartera_(f) { return parsearCartera_(leerFilasArchivo_(f)); }
+// Convierte el archivo (xlsx, xls, csv o Google Sheet) en una matriz de filas.
+function leerFilasArchivo_(f) {
   const tipo = f.getMimeType();
-  if (tipo === MimeType.GOOGLE_SHEETS) return parsearCartera_(SpreadsheetApp.openById(f.getId()).getSheets()[0].getDataRange().getValues());
+  if (tipo === MimeType.GOOGLE_SHEETS) return SpreadsheetApp.openById(f.getId()).getSheets()[0].getDataRange().getValues();
   if (/csv|text\/plain/.test(tipo) || /\.csv$/i.test(f.getName())) {
     let txt = f.getBlob().getDataAsString('UTF-8');
     if (txt.indexOf('\uFFFD') >= 0) txt = f.getBlob().getDataAsString('ISO-8859-1');
     const sep = (txt.split('\n')[0].match(/;/g) || []).length > (txt.split('\n')[0].match(/,/g) || []).length ? ';' : ',';
-    return parsearCartera_(Utilities.parseCsv(txt, sep));
+    return Utilities.parseCsv(txt, sep);
   }
   // Excel: copia temporal convertida a Google Sheets (API de Drive), se lee y se borra
   const r = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + f.getId() + '/copy?supportsAllDrives=true', {
@@ -385,7 +410,7 @@ function leerArchivoCartera_(f) {
   });
   if (r.getResponseCode() !== 200) throw new Error('No se pudo convertir el Excel (' + r.getResponseCode() + ')');
   const tmpId = JSON.parse(r.getContentText()).id;
-  try { return parsearCartera_(SpreadsheetApp.openById(tmpId).getSheets()[0].getDataRange().getValues()); }
+  try { return SpreadsheetApp.openById(tmpId).getSheets()[0].getDataRange().getValues(); }
   finally { try { DriveApp.getFileById(tmpId).setTrashed(true); } catch (e) {} }
 }
 
@@ -468,15 +493,24 @@ function formularios_(html) {
   while ((m = re.exec(html))) {
     const campos = [], ri = /<(input|select|textarea|button)\b[^>]*>/gi; let t;
     while ((t = ri.exec(m[2]))) campos.push({ tag: t[0], tipo: (atributo_(t[0], 'type') || t[1]).toLowerCase(), nombre: atributo_(t[0], 'name'), valor: atributo_(t[0], 'value') || '' });
+    // opciones de cada <select> (p.ej. la lista de empresas del reporte)
+    const rs = /<select\b([^>]*)>([\s\S]*?)<\/select>/gi; let sm;
+    while ((sm = rs.exec(m[2]))) {
+      const nombre = atributo_('<s ' + sm[1] + '>', 'name'), opciones = [], ro = /<option\b([^>]*)>([\s\S]*?)<\/option>/gi; let om;
+      while ((om = ro.exec(sm[2]))) opciones.push({ valor: atributo_('<o ' + om[1] + '>', 'value') !== null ? atributo_('<o ' + om[1] + '>', 'value') : om[2].replace(/<[^>]+>/g, '').trim(), texto: om[2].replace(/<[^>]+>/g, '').trim(), sel: /\bselected\b/i.test(om[1]) });
+      const c = campos.filter(x => x.tipo === 'select' && x.nombre === nombre)[0];
+      if (c) { c.opciones = opciones; c.valor = (opciones.filter(o => o.sel)[0] || opciones[0] || { valor: '' }).valor; }
+    }
     out.push({ action: atributo_('<f ' + m[1] + '>', 'action') || '', metodo: (atributo_('<f ' + m[1] + '>', 'method') || 'get').toLowerCase(), campos: campos, html: m[0] });
   }
   return out;
 }
-function iniciarSesionPortal_(jar) {
+function iniciarSesionPortal_(jar, ruta) {
+  ruta = ruta || CONFIG.PORTAL_REPORTE;
   const props = PropertiesService.getScriptProperties();
   const usuario = props.getProperty('PORTAL_USUARIO'), clave = props.getProperty('PORTAL_CLAVE');
   if (!usuario || !clave) throw new Error('Faltan PORTAL_USUARIO / PORTAL_CLAVE en Propiedades del script');
-  let p = pedir_(jar, CONFIG.PORTAL_BASE + CONFIG.PORTAL_REPORTE);
+  let p = pedir_(jar, CONFIG.PORTAL_BASE + ruta);
   const form = formularios_(p.r.getContentText()).filter(f => f.campos.some(c => c.tipo === 'password'))[0];
   if (!form) return p; // ya hay sesion
   const datos = {};
@@ -491,59 +525,226 @@ function iniciarSesionPortal_(jar) {
   p = pedir_(jar, absoluta_(form.action || p.url, p.url), { method: 'post', payload: datos });
   if (formularios_(p.r.getContentText()).some(f => f.campos.some(c => c.tipo === 'password')))
     throw new Error('El portal rechazó el inicio de sesión (revisa PORTAL_USUARIO / PORTAL_CLAVE)');
-  return pedir_(jar, CONFIG.PORTAL_BASE + CONFIG.PORTAL_REPORTE);
+  return pedir_(jar, CONFIG.PORTAL_BASE + ruta);
 }
 function esExcel_(r) {
   const h = r.getAllHeaders(), ct = String(h['Content-Type'] || h['content-type'] || ''), cd = String(h['Content-Disposition'] || h['content-disposition'] || '');
   return /spreadsheet|excel|octet-stream|csv/i.test(ct) || /\.(xlsx|xls|csv)/i.test(cd);
 }
-function nombreDescarga_(r) {
+function nombreDescarga_(r, base) {
   const h = r.getAllHeaders(), cd = String(h['Content-Disposition'] || h['content-disposition'] || '');
   const m = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i);
-  return m ? decodeURIComponent(m[1]) : 'CarteraRodamientos_' + hoyISO_() + '.xlsx';
+  return m ? decodeURIComponent(m[1]) : (base || 'CarteraRodamientos') + '_' + hoyISO_() + '.xlsx';
 }
-function descargarDelPortal_() {
-  const jar = {};
-  const pagina = iniciarSesionPortal_(jar);
-  const html = pagina.r.getContentText();
-  const intentos = [];
-  if (CONFIG.PORTAL_URL_DESCARGA) intentos.push({ url: absoluta_(CONFIG.PORTAL_URL_DESCARGA, pagina.url), metodo: 'get' });
-  // Enlaces o botones con palabras de exportacion
-  const reA = /<a\b[^>]*href\s*=\s*["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi; let m;
-  while ((m = reA.exec(html))) if (/excel|xls|export|descarg/i.test(m[1] + ' ' + m[2])) intentos.push({ url: absoluta_(m[1].replace(/&amp;/g, '&'), pagina.url), metodo: 'get' });
-  // Formularios del reporte (p.ej. fecha de corte + boton Exportar): se envian con sus valores por defecto
+// Posibles formas de pedir el Excel desde la pagina del reporte (enlaces, botones, rutas JS).
+function intentosDescarga_(html, pagina, ruta, extra) {
+  const intentos = []; let m;
+  const reA = /<a\b[^>]*href\s*=\s*["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
+  if (!extra) while ((m = reA.exec(html))) if (/excel|xls|export|descarg/i.test(m[1] + ' ' + m[2])) intentos.push({ url: absoluta_(m[1].replace(/&amp;/g, '&'), pagina.url), metodo: 'get' });
   formularios_(html).forEach(f => {
+    if (f.campos.some(c => c.tipo === 'password')) return;
     const datos = {};
     f.campos.forEach(c => { if (c.nombre && !/submit|button|checkbox|radio/.test(c.tipo)) datos[c.nombre] = c.valor; if (/fecha|corte/i.test(c.nombre || '') && !c.valor) datos[c.nombre] = hoyISO_(); });
-    f.campos.filter(c => /submit|button/.test(c.tipo) && /excel|export|descarg/i.test(c.tag)).forEach(b => {
+    Object.assign(datos, extra || {});
+    const botones = f.campos.filter(c => /submit|button/.test(c.tipo) && /excel|export|descarg/i.test(c.tag));
+    (botones.length ? botones : (extra ? [{ tag: '', nombre: null }] : [])).forEach(b => {
       const d = Object.assign({}, datos); if (b.nombre) d[b.nombre] = b.valor;
       intentos.push({ url: absoluta_(atributo_(b.tag, 'formaction') || f.action || pagina.url, pagina.url), metodo: f.metodo, datos: d });
     });
   });
-  // URLs de exportacion mencionadas en el JavaScript de la pagina
   const reJs = /["'](\/[A-Za-z0-9_\/-]*(?:Export|Excel|Descarg)[A-Za-z0-9_\/-]*)["']/gi;
-  while ((m = reJs.exec(html))) intentos.push({ url: absoluta_(m[1], pagina.url), metodo: 'get' });
-  intentos.push({ url: CONFIG.PORTAL_BASE + CONFIG.PORTAL_REPORTE + '/Exportar', metodo: 'get' }, { url: CONFIG.PORTAL_BASE + CONFIG.PORTAL_REPORTE + 'Excel', metodo: 'get' });
+  while ((m = reJs.exec(html))) intentos.push({ url: absoluta_(m[1], pagina.url), metodo: 'get', datos: extra || null });
+  intentos.push({ url: CONFIG.PORTAL_BASE + ruta + '/Exportar', metodo: 'get', datos: extra || null }, { url: CONFIG.PORTAL_BASE + ruta + 'Excel', metodo: 'get', datos: extra || null });
+  return intentos;
+}
+function probarIntentos_(jar, intentos, base) {
   const vistos = {};
   for (let i = 0; i < intentos.length; i++) {
-    const it = intentos[i], k = it.metodo + ' ' + it.url; if (vistos[k]) continue; vistos[k] = 1;
+    const it = intentos[i], k = it.metodo + ' ' + it.url + JSON.stringify(it.datos || ''); if (vistos[k]) continue; vistos[k] = 1;
     const p = it.metodo === 'post' ? pedir_(jar, it.url, { method: 'post', payload: it.datos || {} }) : pedir_(jar, it.datos ? it.url + (it.url.indexOf('?') >= 0 ? '&' : '?') + Object.keys(it.datos).map(x => encodeURIComponent(x) + '=' + encodeURIComponent(it.datos[x])).join('&') : it.url);
-    if (p.code === 200 && esExcel_(p.r)) return p.r.getBlob().setName(nombreDescarga_(p.r));
+    if (p.code === 200 && esExcel_(p.r)) return p.r.getBlob().setName(nombreDescarga_(p.r, base));
   }
-  throw new Error('Inició sesión pero no encontró el botón de Excel. Ejecuta diagnosticarPortal y comparte el registro, o pon la URL en CONFIG.PORTAL_URL_DESCARGA');
+  return null;
+}
+/**
+ * Inicia sesion, abre la pagina del reporte y descarga el/los Excel.
+ * porEmpresa = true: si el reporte tiene una lista de empresas, descarga un archivo por cada una.
+ */
+function descargarReportes_(ruta, porEmpresa, urlsFijas, base) {
+  const jar = {};
+  const pagina = iniciarSesionPortal_(jar, ruta);
+  const html = pagina.r.getContentText();
+  const blobs = [];
+  (urlsFijas || []).filter(String).forEach(u => {
+    const p = pedir_(jar, absoluta_(u, pagina.url));
+    if (p.code === 200 && esExcel_(p.r)) blobs.push(p.r.getBlob().setName(nombreDescarga_(p.r, base + '_' + (blobs.length + 1))));
+  });
+  if (blobs.length) return blobs;
+  if (porEmpresa) {
+    formularios_(html).forEach(f => {
+      const sel = f.campos.filter(c => c.tipo === 'select' && /empresa/i.test((c.nombre || '') + ' ' + c.tag) && (c.opciones || []).filter(o => o.valor).length > 1)[0];
+      if (!sel || blobs.length) return;
+      sel.opciones.filter(o => o.valor && !/seleccion|todas|todos/i.test(o.texto)).forEach(o => {
+        const extra = {}; extra[sel.nombre] = o.valor;
+        const b = probarIntentos_(jar, intentosDescarga_(html, pagina, ruta, extra), base + '_' + o.valor);
+        if (b) blobs.push(b);
+      });
+    });
+    if (blobs.length) return blobs;
+  }
+  const b = probarIntentos_(jar, intentosDescarga_(html, pagina, ruta), base);
+  if (b) return [b];
+  throw new Error('Inició sesión pero no encontró la descarga en Excel de ' + ruta + '. Ejecuta el diagnóstico y comparte el registro, o configura la URL de descarga');
+}
+function descargarDelPortal_() {
+  return descargarReportes_(CONFIG.PORTAL_REPORTE, false, CONFIG.PORTAL_URL_DESCARGA ? [CONFIG.PORTAL_URL_DESCARGA] : [], 'CarteraRodamientos')[0];
 }
 
 /** Ejecutar a mano si la descarga del portal falla: muestra en el registro lo que ve el script (sin la clave). */
-function diagnosticarPortal() {
+function diagnosticarPortalParque() { diagnosticarPortal(CONFIG.PORTAL_PARQUE); }
+function diagnosticarPortal(ruta) {
+  ruta = typeof ruta === 'string' ? ruta : CONFIG.PORTAL_REPORTE;
   const jar = {};
-  const p = iniciarSesionPortal_(jar);
+  const p = iniciarSesionPortal_(jar, ruta);
   const html = p.r.getContentText();
   console.log('URL tras iniciar sesión: ' + p.url + ' · código ' + p.code + ' · cookies: ' + Object.keys(jar).join(', '));
-  formularios_(html).forEach((f, i) => console.log('Formulario ' + i + ': ' + f.metodo.toUpperCase() + ' ' + f.action + ' · campos: ' + f.campos.map(c => c.tipo + ':' + (c.nombre || '') + (/submit|button/.test(c.tipo) ? '[' + c.tag.replace(/\s+/g, ' ').slice(0, 120) + ']' : '')).join(' | ')));
+  formularios_(html).forEach((f, i) => console.log('Formulario ' + i + ': ' + f.metodo.toUpperCase() + ' ' + f.action + ' · campos: ' + f.campos.map(c => c.tipo + ':' + (c.nombre || '') + (/submit|button/.test(c.tipo) ? '[' + c.tag.replace(/\s+/g, ' ').slice(0, 120) + ']' : '') + (c.opciones ? '{' + c.opciones.slice(0, 15).map(o => o.valor + '=' + o.texto).join(', ') + '}' : '')).join(' | ')));
   const enlaces = html.match(/<(a|button)\b[^>]*>[\s\S]{0,80}?<\/(a|button)>/gi) || [];
   console.log('Botones/enlaces: \n' + enlaces.filter(x => /excel|xls|export|descarg|generar|consultar/i.test(x)).map(x => x.replace(/\s+/g, ' ')).join('\n'));
   console.log('Scripts: ' + (html.match(/<script[^>]*src=["'][^"']+["']/gi) || []).join(' '));
-  console.log('Rutas JS: ' + ((html.match(/["']\/[A-Za-z0-9_\/-]{3,}["']/g) || []).filter(x => /report|cartera|export|excel/i.test(x)).join(' ')));
+  console.log('Rutas JS: ' + ((html.match(/["']\/[A-Za-z0-9_\/-]{3,}["']/g) || []).filter(x => /report|cartera|parque|export|excel/i.test(x)).join(' ')));
+}
+
+
+// =====================================================================
+//  PARQUE AUTOMOTOR (vencimientos): consolidado de los reportes por empresa
+//  Cada archivo "ParqueAutomotor_NN.xlsx" trae una empresa (fila "Empresa:");
+//  el CONSOLIDADO trae varias (columna "Empresa"). Al recibir una empresa se
+//  reemplazan solo sus filas, asi la hoja ParqueAutomotor ES el consolidado.
+// =====================================================================
+const ENC_PARQUE = ['Placa','No Interno','Nombre Propietario','Documento','Teléfono','Celular','Dirección de Residencia','Email','Fecha Nacimiento','Email Secundario','Ciudad propietario','Tar. Operacion #','Vence T. Operacion','Marca Vehículo','Clase Vehículo','Tipo Combustible','Tipo Carrocería','Pasajeros','Modelo','Cilindraje','Ciudad Vehiculo','Chasis','Motor','No. SOAT','Entidad Soat','Fecha SOAT','Entidad Seguros','Fecha Seguros','Fecha TecMecanica','Fecha Preventiva','Tipo Convenio','Empresa Convenio','Estado','Estado Vehículo','Fecha Creación','Usuario Creación','Empresa','Actualizado','Origen'];
+// Columnas que necesita la app de vencimientos (el resto queda en la hoja/consolidado)
+const COLS_PARQUE_APP = ['Placa','No Interno','Nombre Propietario','Documento','Celular','Email','Vence T. Operacion','Fecha SOAT','Fecha Seguros','Fecha TecMecanica','Fecha Preventiva','Estado','Empresa'];
+const FECHAS_PARQUE = ['Vence T. Operacion','Fecha SOAT','Fecha Seguros','Fecha TecMecanica','Fecha Preventiva','Fecha Nacimiento'];
+
+function esParque_(filas) {
+  for (let i = 0; i < Math.min(filas.length, 8); i++) {
+    const t = filas[i].map(normalizar_);
+    if (t.some(c => c.indexOf('listado de parque') >= 0)) return true;
+    if (t.indexOf('placa') >= 0 && (t.indexOf('vence t. operacion') >= 0 || t.indexOf('fecha soat') >= 0)) return true;
+  }
+  return false;
+}
+function isoCelda_(v) {
+  if (v instanceof Date) return Utilities.formatDate(v, CONFIG.ZONA, 'yyyy-MM-dd');
+  const s = String(v === null || v === undefined ? '' : v).trim();
+  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if (m) return m[3] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[1]).slice(-2);
+  m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); if (m) return m[0];
+  return s;
+}
+function parsearParque_(filas) {
+  let hIdx = -1, empresa = '';
+  for (let i = 0; i < Math.min(filas.length, 10); i++) {
+    const t = filas[i].map(normalizar_);
+    if (t[0] && t[0].indexOf('empresa') === 0 && t[0].indexOf(':') > 0) empresa = String(filas[i].slice(1).filter(x => String(x).trim())[0] || '').trim();
+    if (hIdx < 0 && t.indexOf('placa') >= 0 && (t.indexOf('vence t. operacion') >= 0 || t.indexOf('fecha soat') >= 0)) hIdx = i;
+  }
+  if (hIdx < 0) throw new Error('no se encontró el encabezado del parque automotor');
+  // la columna sin titulo (entre "Empresa Convenio" y "Estado Vehículo") es el Estado
+  const enc = filas[hIdx].map((h, j) => String(h || '').trim() || (normalizar_(filas[hIdx][j + 1]) === 'estado vehiculo' ? 'Estado' : ''));
+  const idx = {}; enc.forEach((h, j) => { if (h && !(normalizar_(h) in idx)) idx[normalizar_(h)] = j; });
+  const out = [];
+  for (let i = hIdx + 1; i < filas.length; i++) {
+    const f = filas[i]; const placa = String(f[idx['placa']] || '').trim().toUpperCase();
+    if (!placa) continue;
+    out.push(ENC_PARQUE.slice(0, 37).map(h => {
+      if (h === 'Placa') return placa;
+      if (h === 'Empresa') return String((idx['empresa'] !== undefined ? f[idx['empresa']] : '') || empresa || '').trim();
+      const j = idx[normalizar_(h)]; const v = j === undefined ? '' : f[j];
+      return FECHAS_PARQUE.indexOf(h) >= 0 ? isoCelda_(v) : (v instanceof Date ? Utilities.formatDate(v, CONFIG.ZONA, 'yyyy-MM-dd HH:mm') : (v === null || v === undefined ? '' : v));
+    }));
+  }
+  return { empresa: empresa, filas: out };
+}
+// tablas: [{filas:[[...37 columnas ENC_PARQUE...]]}] o desde la app: [{encabezados:[...], filas:[[...]]}]
+function guardarParque_(tablas, origen) {
+  const lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    const h = hoja_('ParqueAutomotor', ENC_PARQUE);
+    const n = h.getLastRow() - 1;
+    let actuales = n > 0 ? h.getRange(2, 1, n, ENC_PARQUE.length).getValues() : [];
+    const iEmp = ENC_PARQUE.indexOf('Empresa'), ahora = new Date();
+    const nuevas = [], empresas = {};
+    tablas.forEach(t => {
+      let filas = t.filas || [];
+      if (t.encabezados) { // viene de la app: reordenar por nombre de columna
+        const pos = {}; t.encabezados.forEach((e, j) => pos[normalizar_(e)] = j);
+        filas = filas.map(f => ENC_PARQUE.slice(0, 37).map(e => { const j = pos[normalizar_(e)]; return j === undefined ? '' : (f[j] === null || f[j] === undefined ? '' : f[j]); }));
+      }
+      filas.forEach(f => { const e = String(f[iEmp] || '').trim() || 'SIN EMPRESA'; f[iEmp] = e; empresas[e] = (empresas[e] || 0) + 1; nuevas.push(f.slice(0, 37).concat([ahora, origen])); });
+    });
+    if (!nuevas.length) throw new Error('No llegaron vehículos');
+    // reemplaza solo las empresas recibidas; si una placa cambio de empresa, queda la nueva
+    const placasNuevas = {}; nuevas.forEach(f => placasNuevas[String(f[0]).toUpperCase()] = 1);
+    actuales = actuales.filter(f => f[0] && !(String(f[iEmp]).trim() in empresas) && !placasNuevas[String(f[0]).toUpperCase()]);
+    const todas = actuales.concat(nuevas).sort((a, b) => String(a[iEmp]).localeCompare(String(b[iEmp])) || String(a[0]).localeCompare(String(b[0])));
+    if (n > 0) h.getRange(2, 1, n, ENC_PARQUE.length).clearContent();
+    h.getRange(2, 1, todas.length, ENC_PARQUE.length).setValues(todas);
+    FECHAS_PARQUE.forEach(c => h.getRange(2, ENC_PARQUE.indexOf(c) + 1, todas.length, 1).setNumberFormat('yyyy-mm-dd'));
+    const props = PropertiesService.getScriptProperties();
+    props.setProperties({ PARQUE_CARGA: ahora.toISOString(), PARQUE_ORIGEN: origen, PARQUE_VERSION: String(Date.now()) });
+    hoja_('HistoricoParque', ['Fecha', 'Origen', 'Empresas actualizadas', 'Vehículos recibidos', 'Total consolidado'])
+      .appendRow([ahora, origen, Object.keys(empresas).map(e => e + ' (' + empresas[e] + ')').join(', '), nuevas.length, todas.length]);
+    return { ok: true, empresas: empresas, recibidos: nuevas.length, total: todas.length };
+  } finally { lock.releaseLock(); }
+}
+function obtenerParque_(p) {
+  const props = PropertiesService.getScriptProperties();
+  const version = props.getProperty('PARQUE_VERSION') || '0';
+  if (p && p.version && p.version === version) return { sinCambios: true, version: version };
+  const h = hoja_('ParqueAutomotor', ENC_PARQUE);
+  const n = h.getLastRow() - 1;
+  const cols = COLS_PARQUE_APP.map(c => ENC_PARQUE.indexOf(c));
+  const iAct = ENC_PARQUE.indexOf('Actualizado'), iEmp = ENC_PARQUE.indexOf('Empresa');
+  const filas = [], empresas = {};
+  if (n > 0) h.getRange(2, 1, n, ENC_PARQUE.length).getValues().forEach(f => {
+    if (!f[0]) return;
+    filas.push(cols.map(j => (FECHAS_PARQUE.indexOf(ENC_PARQUE[j]) >= 0 || f[j] instanceof Date) ? isoCelda_(f[j]) : f[j]));
+    const e = f[iEmp]; const act = f[iAct] instanceof Date ? f[iAct].toISOString() : String(f[iAct] || '');
+    if (!empresas[e]) empresas[e] = { actualizado: act, vehiculos: 0 };
+    if (act > empresas[e].actualizado) empresas[e].actualizado = act;
+    empresas[e].vehiculos++;
+  });
+  return { version: version, encabezados: COLS_PARQUE_APP, filas: filas, empresas: empresas, gestion: leerGestion_(),
+    cargado: props.getProperty('PARQUE_CARGA'), origen: props.getProperty('PARQUE_ORIGEN') };
+}
+// Datos que se registran a mano en la tabla de vencimientos (fechas de renovacion,
+// pagos de TO, observaciones, comprobantes en Drive), compartidos entre navegadores.
+function leerGestion_() {
+  const h = hoja_('GestionVehiculos', ['Placa', 'Datos', 'Actualizado', 'Usuario']);
+  const n = h.getLastRow() - 1, out = {};
+  if (n < 1) return out;
+  h.getRange(2, 1, n, 2).getValues().forEach(f => { if (f[0]) { try { out[String(f[0]).toUpperCase()] = JSON.parse(f[1]); } catch (e) {} } });
+  return out;
+}
+function guardarGestionVehiculos_(cambios) {
+  if (!cambios.length) return { ok: true, guardados: 0 };
+  const lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    const h = hoja_('GestionVehiculos', ['Placa', 'Datos', 'Actualizado', 'Usuario']);
+    const n = h.getLastRow() - 1;
+    const filas = n > 0 ? h.getRange(2, 1, n, 4).getValues() : [];
+    const pos = {}; filas.forEach((f, i) => pos[String(f[0]).toUpperCase()] = i);
+    const ahora = new Date();
+    cambios.forEach(c => {
+      const placa = String(c.placa || '').toUpperCase().trim(); if (!placa) return;
+      const fila = [placa, JSON.stringify(c.campos || {}), ahora, c.usuario || ''];
+      if (placa in pos) filas[pos[placa]] = fila; else { pos[placa] = filas.length; filas.push(fila); }
+    });
+    if (filas.length) h.getRange(2, 1, filas.length, 4).setValues(filas);
+    PropertiesService.getScriptProperties().setProperty('PARQUE_VERSION', String(Date.now()));
+    return { ok: true, guardados: cambios.length };
+  } finally { lock.releaseLock(); }
 }
 
 // ===================== CALENDARIOS =====================

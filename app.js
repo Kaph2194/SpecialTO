@@ -580,9 +580,10 @@ function excelFechaAISO(valor){
 }
 
 function onArchivoVencimientosSeleccionado(e){
-  const file=e.target.files[0];
-  if(!file) return;
-  procesarArchivoVencimientos(file);
+  const files=[...e.target.files];
+  if(!files.length) return;
+  // varios ParqueAutomotor (uno por empresa) y/o el CONSOLIDADO: se consolidan en parque.js
+  if(typeof procesarArchivosVencimientos==='function') procesarArchivosVencimientos(files); else procesarArchivoVencimientos(files[0]);
   e.target.value=''; // permite volver a seleccionar el mismo archivo la proxima semana
 }
 
