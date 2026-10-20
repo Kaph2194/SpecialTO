@@ -34,9 +34,10 @@ La app ya trae fija la URL del backend, así que **cualquier navegador** muestra
    - `PORTAL_CLAVE` = la contraseña de ese usuario
    - `CLAVE_APP` = una palabra clave para entrar a la cartera desde la app (**importante**: el repositorio y la URL son públicos; sin esta clave cualquiera que tenga la URL podría leer cédulas, celulares y deudas de los afiliados). La app la pide **una sola vez por navegador**.
    - **Guardar propiedades del script**.
-4. Volver a **Editor** (`< >`), en la lista de funciones de arriba elegir **`configurarTodo`** → **Ejecutar** → **Revisar permisos** → juridico@ → *Configuración avanzada* → *Ir a SpecialCar Cartera* → **Permitir**. Los permisos nuevos son Drive (leer el Excel), Gmail (leer adjuntos) y conexión a servicios externos (entrar al portal).
+4. **Permisos:** ⚙️ **Configuración del proyecto** → activar *Mostrar el archivo de manifiesto "appsscript.json"* → en el editor abrir `appsscript.json`, reemplazar todo por el contenido de [`apps-script/appsscript.json`](apps-script/appsscript.json) y guardar. (Si el manifiesto tiene una lista `oauthScopes` incompleta, Google no pide los permisos nuevos y aparece *"No cuentas con el permiso para llamar a UrlFetchApp.fetch"*.)
+5. Volver a **Editor** (`< >`), en la lista de funciones de arriba elegir **`configurarTodo`** → **Ejecutar** → **Revisar permisos** → juridico@ → *Configuración avanzada* → *Ir a SpecialCar Cartera* → **Permitir**. Los permisos nuevos son Drive (leer el Excel), Gmail (leer adjuntos) y conexión a servicios externos (entrar al portal).
    En el **Registro de ejecución** debe aparecer la carpeta de carga y `"cargado":{...,"placas":666}` (o el número del día). Si aparece un error del portal, ver *Si falla la descarga del portal*.
-5. **Implementar → Gestionar implementaciones** → ✏️ (editar) → *Versión*: **Nueva versión** → **Implementar**. **No crear una implementación nueva**: así la URL sigue siendo la misma que tiene la app.
+6. **Implementar → Gestionar implementaciones** → ✏️ (editar) → *Versión*: **Nueva versión** → **Implementar**. **No crear una implementación nueva**: así la URL sigue siendo la misma que tiene la app.
 
 ### Qué queda automático
 
