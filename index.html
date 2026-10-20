@@ -190,6 +190,7 @@
         <div class="cartera-meta"><span id="cartera-corte"></span> · <span id="cartera-backend-info"></span></div>
       </div>
       <div class="cartera-acciones">
+        <button class="btn btn-sm btn-outline-dark" onclick="importarDelPortalAhora()" title="Descarga el reporte del portal SGT (y revisa correo y carpeta) ahora mismo">🔄 Actualizar desde el portal</button>
         <button class="btn btn-sm btn-outline-dark" onclick="document.getElementById('inputArchivoCartera').click()">📤 Cargar Cartera</button>
         <input type="file" id="inputArchivoCartera" accept=".xlsx,.xls,.csv" style="display:none" onchange="onArchivoCarteraSeleccionado(event)" />
         <button class="btn btn-sm btn-outline-dark" onclick="verInforme('cartera')">👁 Ver informe diario</button>
@@ -215,6 +216,8 @@
         <div class="dash-section">
           <h3 class="dash-title">Placas por periodos vencidos</h3>
           <div id="cartera-rangos" class="rangos-grid"></div>
+          <h3 class="dash-title" style="margin-top:16px">Estado de gestión</h3>
+          <div id="cartera-estados" class="estados-grid"></div>
         </div>
       </div>
 
@@ -237,6 +240,7 @@
             <select id="cFiltroAcuerdo" onchange="renderTablaCartera()">
               <option value="">Acuerdo: todos</option><option value="con">Con acuerdo activo</option><option value="sin">Sin acuerdo</option><option value="incumplido">Acuerdo incumplido</option>
             </select>
+            <select id="cFiltroEstado" onchange="renderCartera()"><option value="">Estado: todos</option></select>
             <label class="chk"><input type="checkbox" id="cSoloSaldo" checked onchange="renderTablaCartera()"/> Solo con saldo</label>
             <button class="btn btn-sm btn-clear" onclick="limpiarFiltrosCartera()">✕ Limpiar</button>
             <span class="ley-sep"></span>
@@ -255,6 +259,8 @@
                 <th>Último periodo pago</th>
                 <th data-ord="periodosVencidos" onclick="ordenarCartera('periodosVencidos')"># Per. vencidos</th>
                 <th data-ord="valorVencido" onclick="ordenarCartera('valorVencido')" style="text-align:right">$ Vencido</th>
+                <th>Estado</th>
+                <th>Radicado</th>
                 <th>Acuerdo</th>
                 <th class="th-acc">Acciones</th>
               </tr></thead>

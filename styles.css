@@ -317,3 +317,21 @@ td.td-tec-e{background:#fffbeb}
   .agenda-item .alerta-nombre{flex-basis:100%;order:5}
   .ac-head{flex-wrap:wrap}
 }
+
+/* Estado de gestion por placa */
+.sel-estado{border-radius:4px;padding:3px 6px;font-size:10.5px;font-weight:700;border:1px solid var(--g200);background:#fff;font-family:inherit}
+select.sel-estado{cursor:pointer;outline:none}
+.est-activo{background:var(--green-bg);color:#15803d;border-color:var(--green-b)}
+.est-notificado{background:var(--yellow-bg);color:#92400e;border-color:var(--yellow-b)}
+.est-desvinc{background:var(--red-bg);color:#b91c1c;border-color:var(--red-b)}
+.est-radicado{background:#ede9fe;color:#5b21b6;border-color:#c4b5fd}
+.inp-radicado{border:1.5px solid #c4b5fd;border-radius:4px;padding:3px 6px;font-size:11px;width:120px;outline:none;font-family:inherit}
+.inp-radicado:focus{border-color:#7c3aed}
+.inp-radicado.rad-falta{border-color:var(--red);background:var(--red-bg)}
+.inp-radicado.rad-falta::placeholder{color:#b91c1c}
+.estados-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.estado-chip{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1.5px solid var(--g200);border-radius:8px;background:#fff;cursor:pointer;font-family:inherit;text-align:left}
+.estado-chip:hover,.estado-chip.activo{border-color:var(--blue);background:var(--blue-bg)}
+.estado-chip strong{font-size:16px;color:var(--g800)}
+.estado-chip small{margin-left:auto;font-size:10.5px;color:var(--g500)}
+a.link-btn{text-decoration:underline}

@@ -33,25 +33,40 @@ const CONFIG = {
   SHEET_ID: '',                    // vacio = se crea "SpecialCar - Cartera" en el Drive de juridico@ la primera vez
   CALENDARIO_ID: '',               // vacio = calendario principal de juridico@
   ENVIAR_INVITACIONES: false,      // true = directortransporte@ recibe un correo por cada evento creado
-  MAX_FILAS_CORREO: 120,           // filas de detalle en el cuerpo del correo (Gmail recorta correos >100KB; el PDF y el CSV adjuntos llevan todas las placas)
+  MAX_FILAS_CORREO: 100,           // filas de detalle en el cuerpo del correo (Gmail recorta correos >100KB; el PDF y el CSV adjuntos llevan todas las placas)
   NOTIFICAR_ACUERDOS: true,        // correo automatico (CC director y CEO) al crear, pagar o anular un acuerdo
-  CLAVE: ''                        // opcional: igual a CARTERA_CLAVE en cartera.js
+  // ---- Carga automatica del reporte CarteraRodamientos (cada hora) ----
+  IMPORTAR_DESDE_DRIVE: true,      // todo Excel/CSV que se guarde en la carpeta de abajo se carga solo
+  CARPETA_IMPORTAR: 'SpecialCar Cartera - Cargar aqui',
+  IMPORTAR_DESDE_CORREO: true,     // todo correo que llegue a juridico@ con el reporte adjunto se carga solo
+  BUSQUEDA_CORREO: 'has:attachment (filename:xlsx OR filename:xls OR filename:csv) (cartera OR rodamientos OR CarteraRodamientos) newer_than:10d -label:cartera-importada',
+  // Descarga directa desde el portal SGT. Usuario y clave NO van aqui: se guardan en
+  // Configuracion del proyecto > Propiedades del script: PORTAL_USUARIO y PORTAL_CLAVE.
+  DESCARGAR_DEL_PORTAL: true,
+  PORTAL_BASE: 'https://portal2sgt.azurewebsites.net',
+  PORTAL_REPORTE: '/Reportes/CarteraRodamiento',
+  PORTAL_URL_DESCARGA: '',         // si la deteccion automatica no encuentra el boton de Excel, pegar aqui la URL exacta de descarga
+  HORAS_PORTAL: [6, 12, 17],       // horas del dia en que se descarga del portal (la de 6 queda lista para el informe de las 7)
+  CLAVE: ''                        // NO escribirla aqui: usar la propiedad del script CLAVE_APP (la app la pide una vez por navegador)
 };
 
 // ===================== WEB APP =====================
 function doGet() {
   const disparador = asegurarDisparador_();
-  return json_({ ok: true, servicio: 'cartera-specialcar', cuenta: Session.getEffectiveUser().getEmail(), disparador: disparador });
+  return json_({ ok: true, servicio: 'cartera-specialcar', disparador: disparador });
 }
 
 function doPost(e) {
   try {
     const p = JSON.parse(e.postData.contents || '{}');
-    if (CONFIG.CLAVE && p.clave !== CONFIG.CLAVE) return json_({ error: 'clave invalida' });
+    const claveApp = CONFIG.CLAVE || PropertiesService.getScriptProperties().getProperty('CLAVE_APP');
+    if (claveApp && p.clave !== claveApp) return json_({ error: 'clave invalida' });
     const disparador = asegurarDisparador_();
     switch (p.accion) {
-      case 'ping':                 return json_({ ok: true, cuenta: Session.getEffectiveUser().getEmail(), disparador: disparador, placas: leerCartera_().length, hoja: libro_().getUrl() });
-      case 'obtenerCartera':       return json_(obtenerTodo_());
+      case 'ping':                 return json_({ ok: true, cuenta: Session.getEffectiveUser().getEmail(), disparador: disparador, placas: leerCartera_().length, hoja: libro_().getUrl(), carpeta: urlCarpetaImportar_() });
+      case 'obtenerCartera':       return json_(obtenerTodo_(p));
+      case 'guardarEstadoPlaca':   return json_(guardarEstadoPlaca_(p));
+      case 'importarAhora':        return json_(importarCarteraAutomatica(true));
       case 'guardarCartera':       return json_(guardarCartera_(p));
       case 'guardarAcuerdo':       return json_(guardarAcuerdo_(p.acuerdo));
       case 'enviarInformeCartera': return json_(enviarInformeCartera());
@@ -103,11 +118,12 @@ function guardarCartera_(p) {
     h.getRange(2, 1, filas.length, ENC_CARTERA.length).setValues(filas);
     h.getRange(2, 12, filas.length, 1).setNumberFormat('$#,##0');
     const props = PropertiesService.getScriptProperties();
-    props.setProperties({ CARTERA_CORTE: p.fechaCorte || hoyISO_(), CARTERA_ARCHIVO: p.archivo || '', CARTERA_CARGA: new Date().toISOString() });
+    props.setProperties({ CARTERA_CORTE: p.fechaCorte || hoyISO_(), CARTERA_ARCHIVO: p.archivo || '', CARTERA_CARGA: new Date().toISOString(), CARTERA_ORIGEN: p.origen || 'Carga manual en la app' });
+    tocarVersion_();
     // Historico diario para ver la evolucion de la cartera
     const hist = hoja_('Historico', ['Fecha carga', 'Fecha corte', 'Archivo', 'Placas', 'Placas con saldo', 'Total vencido']);
     const conSaldo = regs.filter(r => Number(r.valorVencido) > 0);
-    hist.appendRow([new Date(), p.fechaCorte || '', p.archivo || '', regs.length, conSaldo.length, conSaldo.reduce((s, r) => s + Number(r.valorVencido), 0)]);
+    hist.appendRow([new Date(), p.fechaCorte || '', (p.archivo || '') + (p.origen ? ' (' + p.origen + ')' : ''), regs.length, conSaldo.length, conSaldo.reduce((s, r) => s + Number(r.valorVencido), 0)]);
     return { ok: true, placas: regs.length };
   } finally { lock.releaseLock(); }
 }
@@ -158,6 +174,7 @@ function guardarAcuerdo_(a) {
     if (i >= 0) h.getRange(i + 2, 1, 1, fila.length).setValues([fila]);
     else h.appendRow(fila);
     escribirCompromisos_();
+    tocarVersion_();
   } finally { lock.releaseLock(); }
   if (evento && CONFIG.NOTIFICAR_ACUERDOS) { try { notificarAcuerdo_(a, evento); } catch (e) { console.warn('Notificacion acuerdo', e); } }
   return { ok: true, acuerdo: a, notificado: evento };
@@ -202,9 +219,58 @@ function escribirCompromisos_() {
   if (filas.length) h.getRange(2, 1, filas.length, 10).setValues(filas);
 }
 
-function obtenerTodo_() {
+// Cada escritura sube la "version"; la app pregunta cada minuto y solo descarga todo si cambio.
+function versionActual_() { return PropertiesService.getScriptProperties().getProperty('VERSION') || '0'; }
+function tocarVersion_() { PropertiesService.getScriptProperties().setProperty('VERSION', String(Date.now())); }
+
+function obtenerTodo_(p) {
   const props = PropertiesService.getScriptProperties();
-  return { fechaCorte: props.getProperty('CARTERA_CORTE'), archivo: props.getProperty('CARTERA_ARCHIVO'), registros: leerCartera_(), acuerdos: leerAcuerdos_(), cuenta: Session.getEffectiveUser().getEmail() };
+  const version = versionActual_();
+  if (p && p.version && p.version === version) return { sinCambios: true, version: version };
+  return { version: version, fechaCorte: props.getProperty('CARTERA_CORTE'), archivo: props.getProperty('CARTERA_ARCHIVO'),
+    cargado: props.getProperty('CARTERA_CARGA'), origen: props.getProperty('CARTERA_ORIGEN'),
+    registros: leerCartera_(), acuerdos: leerAcuerdos_(), estados: leerEstados_(), cuenta: Session.getEffectiveUser().getEmail(),
+    carpeta: props.getProperty('CARPETA_IMPORTAR_URL') || '' };
+}
+
+// ===================== ESTADO DE GESTION POR PLACA =====================
+// Activo | Notificado | Desvinculacion | Radicado (+ numero de radicado). No depende del
+// archivo de cartera: se conserva por placa aunque se cargue un reporte nuevo.
+const ESTADOS_PLACA_ = { activo: 'Activo', notificado: 'Notificado', desvinculacion: 'Desvinculación', radicado: 'Radicado' };
+const ENC_ESTADOS = ['Placa', 'Estado', 'N° Radicado', 'Fecha cambio', 'Usuario', 'Historial'];
+function leerEstados_() {
+  const h = hoja_('EstadosPlaca', ENC_ESTADOS);
+  const n = h.getLastRow() - 1, out = {};
+  if (n < 1) return out;
+  h.getRange(2, 1, n, 5).getValues().forEach(f => {
+    if (!f[0]) return;
+    const clave = Object.keys(ESTADOS_PLACA_).filter(k => ESTADOS_PLACA_[k] === f[1] || k === f[1])[0] || 'activo';
+    out[String(f[0]).toUpperCase()] = { estado: clave, radicado: String(f[2] || ''), fecha: f[3] instanceof Date ? f[3].toISOString() : String(f[3] || ''), usuario: String(f[4] || '') };
+  });
+  return out;
+}
+function guardarEstadoPlaca_(p) {
+  const placa = String(p.placa || '').toUpperCase().trim();
+  const estado = ESTADOS_PLACA_[p.estado] ? p.estado : null;
+  if (!placa || !estado) throw new Error('Placa o estado invalido');
+  const radicado = estado === 'radicado' ? String(p.radicado || '').trim() : '';
+  const lock = LockService.getScriptLock(); lock.waitLock(30000);
+  try {
+    const h = hoja_('EstadosPlaca', ENC_ESTADOS);
+    const n = h.getLastRow() - 1;
+    const placas = n > 0 ? h.getRange(2, 1, n, 1).getValues().map(f => String(f[0]).toUpperCase()) : [];
+    const i = placas.indexOf(placa);
+    const ahora = new Date(), usuario = p.usuario || CONFIG.CORREO_CARTERA;
+    const linea = Utilities.formatDate(ahora, CONFIG.ZONA, 'yyyy-MM-dd HH:mm') + ' ' + ESTADOS_PLACA_[estado] + (radicado ? ' #' + radicado : '');
+    if (i >= 0) {
+      const hist = String(h.getRange(i + 2, 6).getValue() || '');
+      h.getRange(i + 2, 1, 1, 6).setValues([[placa, ESTADOS_PLACA_[estado], radicado, ahora, usuario, (hist ? hist + '\n' : '') + linea]]);
+    } else {
+      h.appendRow([placa, ESTADOS_PLACA_[estado], radicado, ahora, usuario, linea]);
+    }
+    tocarVersion_();
+    return { ok: true, placa: placa, estado: { estado: estado, radicado: radicado, fecha: ahora.toISOString(), usuario: usuario } };
+  } finally { lock.releaseLock(); }
 }
 
 // ===================== LOGICA DE ACUERDOS (igual que en cartera.js) =====================
@@ -225,6 +291,259 @@ function estadoAcuerdo_(a) {
   if ((a.compromisos || []).length && !t.pendientes.length) return 'cumplido';
   if (t.vencidos.length) return 'incumplido';
   return 'vigente';
+}
+
+
+// =====================================================================
+//  CARGA AUTOMATICA DEL REPORTE CarteraRodamientos
+//  Fuentes (en este orden): portal SGT, correo de juridico@, carpeta de Drive.
+//  Corre cada hora (disparador) y justo antes del informe diario.
+// =====================================================================
+function carpetaImportar_() {
+  const props = PropertiesService.getScriptProperties();
+  const id = props.getProperty('CARPETA_IMPORTAR_ID');
+  if (id) { try { const f = DriveApp.getFolderById(id); if (!f.isTrashed()) return f; } catch (e) {} }
+  const it = DriveApp.getFoldersByName(CONFIG.CARPETA_IMPORTAR);
+  const f = it.hasNext() ? it.next() : DriveApp.createFolder(CONFIG.CARPETA_IMPORTAR);
+  props.setProperties({ CARPETA_IMPORTAR_ID: f.getId(), CARPETA_IMPORTAR_URL: f.getUrl() });
+  return f;
+}
+function subcarpeta_(padre, nombre) { const it = padre.getFoldersByName(nombre); return it.hasNext() ? it.next() : padre.createFolder(nombre); }
+function urlCarpetaImportar_() { try { return carpetaImportar_().getUrl(); } catch (e) { return ''; } }
+
+/** Revisa portal, correo y carpeta; carga el reporte mas reciente. Lo ejecuta el disparador horario. */
+function importarCarteraAutomatica(forzarPortal) {
+  const res = { portal: null, correo: 0, archivos: 0, cargado: null, errores: [] };
+  const carpeta = carpetaImportar_();
+  const horaActual = Number(Utilities.formatDate(new Date(), CONFIG.ZONA, 'H'));
+  const props = PropertiesService.getScriptProperties();
+  // 1) Portal SGT
+  if (CONFIG.DESCARGAR_DEL_PORTAL && props.getProperty('PORTAL_USUARIO')) {
+    const clave = hoyISO_() + '-' + horaActual;
+    if (forzarPortal || (CONFIG.HORAS_PORTAL.indexOf(horaActual) >= 0 && props.getProperty('PORTAL_ULTIMA') !== clave)) {
+      try { const blob = descargarDelPortal_(); carpeta.createFile(blob); res.portal = blob.getName(); props.setProperty('PORTAL_ULTIMA', clave); props.deleteProperty('PORTAL_ERROR'); }
+      catch (e) { res.errores.push('Portal: ' + e.message); props.setProperty('PORTAL_ERROR', Utilities.formatDate(new Date(), CONFIG.ZONA, 'yyyy-MM-dd HH:mm') + ' ' + e.message); }
+    }
+  }
+  // 2) Correo: adjuntos del reporte que lleguen a juridico@
+  if (CONFIG.IMPORTAR_DESDE_CORREO) {
+    try {
+      const etiqueta = GmailApp.getUserLabelByName('cartera-importada') || GmailApp.createLabel('cartera-importada');
+      GmailApp.search(CONFIG.BUSQUEDA_CORREO, 0, 20).forEach(hilo => {
+        hilo.getMessages().forEach(m => m.getAttachments().forEach(a => {
+          if (/\.(xlsx|xls|csv)$/i.test(a.getName())) { carpeta.createFile(a.copyBlob()).setName(a.getName()); res.correo++; }
+        }));
+        hilo.addLabel(etiqueta);
+      });
+    } catch (e) { res.errores.push('Correo: ' + e.message); }
+  }
+  // 3) Carpeta de Drive (incluye lo que dejaron el portal y el correo)
+  if (CONFIG.IMPORTAR_DESDE_DRIVE || res.portal || res.correo) {
+    const procesados = subcarpeta_(carpeta, 'Procesados'), conError = subcarpeta_(carpeta, 'Con error');
+    const archivos = [];
+    const it = carpeta.getFiles();
+    while (it.hasNext()) archivos.push(it.next());
+    archivos.sort((a, b) => a.getDateCreated() - b.getDateCreated());
+    let mejor = null;
+    archivos.forEach(f => {
+      try {
+        const datos = leerArchivoCartera_(f);
+        if (!datos.registros.length) throw new Error('sin placas');
+        res.archivos++;
+        if (!mejor || datos.fechaCorte >= mejor.fechaCorte) mejor = Object.assign(datos, { archivo: f.getName() });
+        f.moveTo(procesados);
+      } catch (e) { res.errores.push(f.getName() + ': ' + e.message); f.moveTo(conError); }
+    });
+    if (mejor) {
+      const actual = props.getProperty('CARTERA_CORTE') || '';
+      if (!actual || mejor.fechaCorte >= actual) {
+        const origen = res.portal ? 'Portal SGT (automático)' : res.correo ? 'Correo juridico@ (automático)' : 'Carpeta de Drive (automático)';
+        guardarCartera_({ fechaCorte: mejor.fechaCorte, archivo: mejor.archivo, registros: mejor.registros, origen: origen });
+        res.cargado = { archivo: mejor.archivo, fechaCorte: mejor.fechaCorte, placas: mejor.registros.length };
+      } else res.errores.push('Se omitió ' + mejor.archivo + ': su corte (' + mejor.fechaCorte + ') es anterior al cargado (' + actual + ')');
+    }
+  }
+  console.log(JSON.stringify(res));
+  return res;
+}
+
+// Convierte el archivo (xlsx, xls, csv o Google Sheet) en filas y lo interpreta.
+function leerArchivoCartera_(f) {
+  const tipo = f.getMimeType();
+  if (tipo === MimeType.GOOGLE_SHEETS) return parsearCartera_(SpreadsheetApp.openById(f.getId()).getSheets()[0].getDataRange().getValues());
+  if (/csv|text\/plain/.test(tipo) || /\.csv$/i.test(f.getName())) {
+    let txt = f.getBlob().getDataAsString('UTF-8');
+    if (txt.indexOf('\uFFFD') >= 0) txt = f.getBlob().getDataAsString('ISO-8859-1');
+    const sep = (txt.split('\n')[0].match(/;/g) || []).length > (txt.split('\n')[0].match(/,/g) || []).length ? ';' : ',';
+    return parsearCartera_(Utilities.parseCsv(txt, sep));
+  }
+  // Excel: copia temporal convertida a Google Sheets (API de Drive), se lee y se borra
+  const r = UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/' + f.getId() + '/copy?supportsAllDrives=true', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+    payload: JSON.stringify({ name: 'tmp_cartera_' + Date.now(), mimeType: MimeType.GOOGLE_SHEETS })
+  });
+  if (r.getResponseCode() !== 200) throw new Error('No se pudo convertir el Excel (' + r.getResponseCode() + ')');
+  const tmpId = JSON.parse(r.getContentText()).id;
+  try { return parsearCartera_(SpreadsheetApp.openById(tmpId).getSheets()[0].getDataRange().getValues()); }
+  finally { try { DriveApp.getFileById(tmpId).setTrashed(true); } catch (e) {} }
+}
+
+function normalizar_(s) { return String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim(); }
+function mapearCol_(h) {
+  h = normalizar_(h);
+  if (h.indexOf('placa') >= 0) return 'placa';
+  if (h.indexOf('interno') >= 0) return 'numInterno';
+  if (h.indexOf('identificacion') >= 0 || h.indexOf('documento') >= 0 || h.indexOf('cedula') >= 0) return 'identificacion';
+  if (h.indexOf('nombre') >= 0) return 'nombre';
+  if (h.indexOf('celular') >= 0 || h.indexOf('telefono') >= 0) return 'celular';
+  if (h.indexOf('correo') >= 0 || h.indexOf('email') >= 0) return 'correo';
+  if (h.indexOf('convenio') >= 0) return 'empresaConvenio';
+  if (h.indexOf('empresa') >= 0) return 'empresa';
+  if (h.indexOf('clase') >= 0) return 'clase';
+  if (h.indexOf('ultimo periodo') >= 0) return 'ultimoPeriodo';
+  if (h.indexOf('sin tarifa') >= 0) return 'periodosSinTarifa';
+  if (h.indexOf('$') >= 0 || (h.indexOf('valor') >= 0 && h.indexOf('vencid') >= 0)) return 'valorVencido';
+  if (h.indexOf('#') >= 0 || (h.indexOf('periodos') >= 0 && h.indexOf('vencid') >= 0)) return 'periodosVencidos';
+  if (h.indexOf('estado') >= 0) return 'estado';
+  return null;
+}
+function aNumero_(v) { if (typeof v === 'number') return v; const t = String(v || '').replace(/[^\d,.-]/g, ''); return t ? (Number(t.replace(/\./g, '').replace(',', '.')) || 0) : 0; }
+// Misma logica que la carga manual de la app (filas de continuacion = periodos sin tarifa).
+function parsearCartera_(filas) {
+  let corte = null, hIdx = -1;
+  for (let i = 0; i < Math.min(filas.length, 15); i++) {
+    filas[i].forEach(c => {
+      if (c instanceof Date && !corte && hIdx < 0 && String(filas[i].join(' ')).toLowerCase().indexOf('corte') >= 0) corte = Utilities.formatDate(c, CONFIG.ZONA, 'yyyy-MM-dd');
+      const m = String(c).toLowerCase().indexOf('corte') >= 0 && String(c).match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+      if (m) corte = m[3] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[1]).slice(-2);
+    });
+    if (hIdx < 0 && filas[i].some(c => normalizar_(c) === 'placa')) hIdx = i;
+  }
+  if (hIdx < 0) throw new Error('no se encontró el encabezado "Placa"');
+  const mapa = filas[hIdx].map(mapearCol_);
+  const regs = []; let cur = null;
+  const txt = v => v === null || v === undefined ? '' : String(v).trim();
+  for (let i = hIdx + 1; i < filas.length; i++) {
+    const o = {};
+    mapa.forEach((k, j) => { if (k && !(k in o)) o[k] = filas[i][j]; });
+    const placa = txt(o.placa).toUpperCase();
+    if (placa) {
+      cur = { placa: placa, numInterno: txt(o.numInterno), identificacion: txt(o.identificacion), nombre: txt(o.nombre), celular: txt(o.celular), correo: txt(o.correo),
+        empresa: txt(o.empresa), clase: txt(o.clase), empresaConvenio: txt(o.empresaConvenio), ultimoPeriodo: txt(o.ultimoPeriodo),
+        periodosVencidos: Math.round(aNumero_(o.periodosVencidos)), valorVencido: aNumero_(o.valorVencido), periodosSinTarifa: o.periodosSinTarifa ? [txt(o.periodosSinTarifa)] : [], estado: txt(o.estado) };
+      regs.push(cur);
+    } else if (cur) {
+      if (o.periodosSinTarifa) cur.periodosSinTarifa.push(txt(o.periodosSinTarifa));
+      if (o.estado && !cur.estado) cur.estado = txt(o.estado);
+    }
+  }
+  return { fechaCorte: corte || hoyISO_(), registros: regs };
+}
+
+// ---------- Portal SGT: inicia sesion y descarga el Excel ----------
+function cookies_(jar, resp) {
+  let sc = resp.getAllHeaders()['Set-Cookie'];
+  if (!sc) return;
+  (Array.isArray(sc) ? sc : [sc]).forEach(c => { const kv = String(c).split(';')[0]; const i = kv.indexOf('='); if (i > 0) jar[kv.slice(0, i).trim()] = kv.slice(i + 1); });
+}
+function cookieHeader_(jar) { return Object.keys(jar).map(k => k + '=' + jar[k]).join('; '); }
+function absoluta_(url, base) { if (/^https?:/i.test(url)) return url; if (url.charAt(0) === '/') return CONFIG.PORTAL_BASE + url; return base.replace(/[^/]*$/, '') + url; }
+// GET/POST siguiendo redirecciones a mano para conservar las cookies de sesion.
+function pedir_(jar, url, opciones) {
+  for (let n = 0; n < 8; n++) {
+    const o = Object.assign({ muteHttpExceptions: true, followRedirects: false }, opciones || {});
+    o.headers = Object.assign({ Cookie: cookieHeader_(jar), 'User-Agent': 'Mozilla/5.0 (SpecialCar Cartera)' }, o.headers || {});
+    const r = UrlFetchApp.fetch(url, o);
+    cookies_(jar, r);
+    const code = r.getResponseCode();
+    if (code >= 300 && code < 400) { const h = r.getAllHeaders(); url = absoluta_(h.Location || h.location, url); opciones = { method: 'get' }; continue; }
+    return { r: r, url: url, code: code };
+  }
+  throw new Error('Demasiadas redirecciones en el portal');
+}
+function atributo_(tag, nombre) { const m = tag.match(new RegExp(nombre + '\\s*=\\s*["\']([^"\']*)["\']', 'i')); return m ? m[1].replace(/&amp;/g, '&') : null; }
+function formularios_(html) {
+  const out = [], re = /<form\b([^>]*)>([\s\S]*?)<\/form>/gi; let m;
+  while ((m = re.exec(html))) {
+    const campos = [], ri = /<(input|select|textarea|button)\b[^>]*>/gi; let t;
+    while ((t = ri.exec(m[2]))) campos.push({ tag: t[0], tipo: (atributo_(t[0], 'type') || t[1]).toLowerCase(), nombre: atributo_(t[0], 'name'), valor: atributo_(t[0], 'value') || '' });
+    out.push({ action: atributo_('<f ' + m[1] + '>', 'action') || '', metodo: (atributo_('<f ' + m[1] + '>', 'method') || 'get').toLowerCase(), campos: campos, html: m[0] });
+  }
+  return out;
+}
+function iniciarSesionPortal_(jar) {
+  const props = PropertiesService.getScriptProperties();
+  const usuario = props.getProperty('PORTAL_USUARIO'), clave = props.getProperty('PORTAL_CLAVE');
+  if (!usuario || !clave) throw new Error('Faltan PORTAL_USUARIO / PORTAL_CLAVE en Propiedades del script');
+  let p = pedir_(jar, CONFIG.PORTAL_BASE + CONFIG.PORTAL_REPORTE);
+  const form = formularios_(p.r.getContentText()).filter(f => f.campos.some(c => c.tipo === 'password'))[0];
+  if (!form) return p; // ya hay sesion
+  const datos = {};
+  form.campos.forEach(c => { if (c.nombre && c.tipo !== 'submit' && c.tipo !== 'button' && c.tipo !== 'checkbox') datos[c.nombre] = c.valor; });
+  const campoClave = form.campos.filter(c => c.tipo === 'password')[0];
+  const campoUsuario = form.campos.filter(c => c.nombre && (c.tipo === 'email' || /email|correo|user|usuario|login/i.test(c.nombre)) && c.tipo !== 'hidden' && c.tipo !== 'password')[0]
+    || form.campos.filter(c => c.nombre && c.tipo === 'text')[0];
+  if (!campoUsuario || !campoClave) throw new Error('No se reconocieron los campos de usuario/clave del portal');
+  datos[campoUsuario.nombre] = usuario; datos[campoClave.nombre] = clave;
+  const recordar = form.campos.filter(c => c.tipo === 'checkbox' && /remember|recordar/i.test(c.nombre || ''))[0];
+  if (recordar) datos[recordar.nombre] = 'true';
+  p = pedir_(jar, absoluta_(form.action || p.url, p.url), { method: 'post', payload: datos });
+  if (formularios_(p.r.getContentText()).some(f => f.campos.some(c => c.tipo === 'password')))
+    throw new Error('El portal rechazó el inicio de sesión (revisa PORTAL_USUARIO / PORTAL_CLAVE)');
+  return pedir_(jar, CONFIG.PORTAL_BASE + CONFIG.PORTAL_REPORTE);
+}
+function esExcel_(r) {
+  const h = r.getAllHeaders(), ct = String(h['Content-Type'] || h['content-type'] || ''), cd = String(h['Content-Disposition'] || h['content-disposition'] || '');
+  return /spreadsheet|excel|octet-stream|csv/i.test(ct) || /\.(xlsx|xls|csv)/i.test(cd);
+}
+function nombreDescarga_(r) {
+  const h = r.getAllHeaders(), cd = String(h['Content-Disposition'] || h['content-disposition'] || '');
+  const m = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i);
+  return m ? decodeURIComponent(m[1]) : 'CarteraRodamientos_' + hoyISO_() + '.xlsx';
+}
+function descargarDelPortal_() {
+  const jar = {};
+  const pagina = iniciarSesionPortal_(jar);
+  const html = pagina.r.getContentText();
+  const intentos = [];
+  if (CONFIG.PORTAL_URL_DESCARGA) intentos.push({ url: absoluta_(CONFIG.PORTAL_URL_DESCARGA, pagina.url), metodo: 'get' });
+  // Enlaces o botones con palabras de exportacion
+  const reA = /<a\b[^>]*href\s*=\s*["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi; let m;
+  while ((m = reA.exec(html))) if (/excel|xls|export|descarg/i.test(m[1] + ' ' + m[2])) intentos.push({ url: absoluta_(m[1].replace(/&amp;/g, '&'), pagina.url), metodo: 'get' });
+  // Formularios del reporte (p.ej. fecha de corte + boton Exportar): se envian con sus valores por defecto
+  formularios_(html).forEach(f => {
+    const datos = {};
+    f.campos.forEach(c => { if (c.nombre && !/submit|button|checkbox|radio/.test(c.tipo)) datos[c.nombre] = c.valor; if (/fecha|corte/i.test(c.nombre || '') && !c.valor) datos[c.nombre] = hoyISO_(); });
+    f.campos.filter(c => /submit|button/.test(c.tipo) && /excel|export|descarg/i.test(c.tag)).forEach(b => {
+      const d = Object.assign({}, datos); if (b.nombre) d[b.nombre] = b.valor;
+      intentos.push({ url: absoluta_(atributo_(b.tag, 'formaction') || f.action || pagina.url, pagina.url), metodo: f.metodo, datos: d });
+    });
+  });
+  // URLs de exportacion mencionadas en el JavaScript de la pagina
+  const reJs = /["'](\/[A-Za-z0-9_\/-]*(?:Export|Excel|Descarg)[A-Za-z0-9_\/-]*)["']/gi;
+  while ((m = reJs.exec(html))) intentos.push({ url: absoluta_(m[1], pagina.url), metodo: 'get' });
+  intentos.push({ url: CONFIG.PORTAL_BASE + CONFIG.PORTAL_REPORTE + '/Exportar', metodo: 'get' }, { url: CONFIG.PORTAL_BASE + CONFIG.PORTAL_REPORTE + 'Excel', metodo: 'get' });
+  const vistos = {};
+  for (let i = 0; i < intentos.length; i++) {
+    const it = intentos[i], k = it.metodo + ' ' + it.url; if (vistos[k]) continue; vistos[k] = 1;
+    const p = it.metodo === 'post' ? pedir_(jar, it.url, { method: 'post', payload: it.datos || {} }) : pedir_(jar, it.datos ? it.url + (it.url.indexOf('?') >= 0 ? '&' : '?') + Object.keys(it.datos).map(x => encodeURIComponent(x) + '=' + encodeURIComponent(it.datos[x])).join('&') : it.url);
+    if (p.code === 200 && esExcel_(p.r)) return p.r.getBlob().setName(nombreDescarga_(p.r));
+  }
+  throw new Error('Inició sesión pero no encontró el botón de Excel. Ejecuta diagnosticarPortal y comparte el registro, o pon la URL en CONFIG.PORTAL_URL_DESCARGA');
+}
+
+/** Ejecutar a mano si la descarga del portal falla: muestra en el registro lo que ve el script (sin la clave). */
+function diagnosticarPortal() {
+  const jar = {};
+  const p = iniciarSesionPortal_(jar);
+  const html = p.r.getContentText();
+  console.log('URL tras iniciar sesión: ' + p.url + ' · código ' + p.code + ' · cookies: ' + Object.keys(jar).join(', '));
+  formularios_(html).forEach((f, i) => console.log('Formulario ' + i + ': ' + f.metodo.toUpperCase() + ' ' + f.action + ' · campos: ' + f.campos.map(c => c.tipo + ':' + (c.nombre || '') + (/submit|button/.test(c.tipo) ? '[' + c.tag.replace(/\s+/g, ' ').slice(0, 120) + ']' : '')).join(' | ')));
+  const enlaces = html.match(/<(a|button)\b[^>]*>[\s\S]{0,80}?<\/(a|button)>/gi) || [];
+  console.log('Botones/enlaces: \n' + enlaces.filter(x => /excel|xls|export|descarg|generar|consultar/i.test(x)).map(x => x.replace(/\s+/g, ' ')).join('\n'));
+  console.log('Scripts: ' + (html.match(/<script[^>]*src=["'][^"']+["']/gi) || []).join(' '));
+  console.log('Rutas JS: ' + ((html.match(/["']\/[A-Za-z0-9_\/-]{3,}["']/g) || []).filter(x => /report|cartera|export|excel/i.test(x)).join(' ')));
 }
 
 // ===================== CALENDARIOS =====================
@@ -335,6 +654,10 @@ function htmlInformeCartera_(regs, acs, corte, limite) {
   const rangos = [['1 periodo', r => r.periodosVencidos === 1], ['2–3 periodos', r => r.periodosVencidos >= 2 && r.periodosVencidos <= 3], ['4–6 periodos', r => r.periodosVencidos >= 4 && r.periodosVencidos <= 6], ['Más de 6', r => r.periodosVencidos > 6]];
   const diasCorte = corte ? Math.round((fechaLocal_(hoyISO_()) - fechaLocal_(corte)) / 86400000) : null;
   const detalle = limite ? conSaldo.slice(0, limite) : conSaldo;
+  const estados = leerEstados_();
+  const est = r => { const e = estados[r.placa]; return e ? ESTADOS_PLACA_[e.estado] + (e.radicado ? ' #' + esc_(e.radicado) : '') : 'Activo'; };
+  const porEstado = {}; Object.keys(ESTADOS_PLACA_).forEach(k => porEstado[k] = { n: 0, v: 0 });
+  conSaldo.forEach(r => { const k = (estados[r.placa] || {}).estado || 'activo'; porEstado[k].n++; porEstado[k].v += r.valorVencido; });
   return '<div style="' + S_.wrap + '">' +
     '<h1 style="' + S_.h1 + '">Informe diario de cartera por placa</h1>' +
     '<p style="' + S_.sub + '">Grupo Special Car — ' + fechaLarga_() + ' · Corte de cartera: ' + (corte ? fmt_(corte) : 'sin cargar') + '</p>' +
@@ -342,11 +665,13 @@ function htmlInformeCartera_(regs, acs, corte, limite) {
     kpis_([[cop_(total), 'Cartera vencida', '#fef2f2', '#b91c1c'], [conSaldo.length, 'Placas con saldo', '#fffbeb', '#92400e'], [regs.length - conSaldo.length, 'Placas al día', '#f0fdf4', '#15803d'], [activos.length, 'Acuerdos activos', '#eff6ff', '#1d4ed8']]) +
     '<h2 style="' + S_.h2 + '">Resumen por empresa</h2>' +
     tabla_(['Empresa', 'Placas', 'Valor vencido'], Object.keys(porEmp).sort((a, b) => porEmp[b].v - porEmp[a].v).map(e => [esc_(e), porEmp[e].n, cop_(porEmp[e].v)]).concat([['<b>TOTAL</b>', '<b>' + conSaldo.length + '</b>', '<b>' + cop_(total) + '</b>']]), [2]) +
+    '<h2 style="' + S_.h2 + '">Por estado de gestión</h2>' +
+    tabla_(['Estado', 'Placas con saldo', 'Valor'], Object.keys(ESTADOS_PLACA_).map(k => [ESTADOS_PLACA_[k], porEstado[k].n, cop_(porEstado[k].v)]), [2]) +
     '<h2 style="' + S_.h2 + '">Por periodos vencidos</h2>' +
     tabla_(['Rango', 'Placas', 'Valor'], rangos.map(x => { const l = conSaldo.filter(x[1]); return [x[0], l.length, cop_(l.reduce((s, r) => s + r.valorVencido, 0))]; }), [2]) +
     '<h2 style="' + S_.h2 + '">Detalle por placa (' + conSaldo.length + ')' + (detalle.length < conSaldo.length ? ' — se muestran las ' + detalle.length + ' de mayor valor; el detalle completo va en el PDF y el CSV adjuntos' : '') + '</h2>' +
-    tabla_(['Placa', 'Afiliado', 'Empresa', 'Celular', 'Último periodo pago', '# Per.', 'Valor vencido', 'Acuerdo'],
-      detalle.map(r => ['<b>' + esc_(r.placa) + '</b>', esc_(r.nombre), esc_(r.empresa), esc_(r.celular), esc_(r.ultimoPeriodo), r.periodosVencidos, cop_(r.valorVencido), acPorPlaca[r.placa] ? ESTADOS_[estadoAcuerdo_(acPorPlaca[r.placa])] : '—']), [6]) +
+    tabla_(['Placa', 'Afiliado', 'Empresa', 'Celular', 'Último periodo pago', '# Per.', 'Valor vencido', 'Estado', 'Acuerdo'],
+      detalle.map(r => ['<b>' + esc_(r.placa) + '</b>', esc_(r.nombre), esc_(r.empresa), esc_(r.celular), esc_(r.ultimoPeriodo), r.periodosVencidos, cop_(r.valorVencido), est(r), acPorPlaca[r.placa] ? ESTADOS_[estadoAcuerdo_(acPorPlaca[r.placa])] : '—']), [6]) +
     '<p style="font-size:10px;color:#9ca3af;text-align:center;margin-top:24px">Enviado automáticamente desde ' + CONFIG.CORREO_CARTERA + ' — Sistema de Vencimientos y Cartera SpecialCar — Confidencial</p></div>';
 }
 
@@ -393,8 +718,9 @@ function pdf_(html, nombre) {
 }
 function csvCartera_(regs, acs) {
   const acPorPlaca = {}; acs.filter(a => ['vigente', 'incumplido'].indexOf(estadoAcuerdo_(a)) >= 0).forEach(a => acPorPlaca[a.placa] = a);
-  const enc = ['Placa', 'N Interno', 'Identificacion', 'Afiliado', 'Celular', 'Correo', 'Empresa', 'Clase', 'Ultimo periodo pago', '# Periodos vencidos', '$ Valor vencido', 'Acuerdo'];
-  const filas = regs.slice().sort((a, b) => b.valorVencido - a.valorVencido).map(r => [r.placa, r.numInterno, r.identificacion, r.nombre, r.celular, r.correo, r.empresa, r.clase, r.ultimoPeriodo, r.periodosVencidos, r.valorVencido, acPorPlaca[r.placa] ? ESTADOS_[estadoAcuerdo_(acPorPlaca[r.placa])] : '']);
+  const estados = leerEstados_();
+  const enc = ['Placa', 'N Interno', 'Identificacion', 'Afiliado', 'Celular', 'Correo', 'Empresa', 'Clase', 'Ultimo periodo pago', '# Periodos vencidos', '$ Valor vencido', 'Estado', 'N Radicado', 'Acuerdo'];
+  const filas = regs.slice().sort((a, b) => b.valorVencido - a.valorVencido).map(r => { const e = estados[r.placa] || {}; return [r.placa, r.numInterno, r.identificacion, r.nombre, r.celular, r.correo, r.empresa, r.clase, r.ultimoPeriodo, r.periodosVencidos, r.valorVencido, ESTADOS_PLACA_[e.estado || 'activo'], e.radicado || '', acPorPlaca[r.placa] ? ESTADOS_[estadoAcuerdo_(acPorPlaca[r.placa])] : '']; });
   const csv = [enc].concat(filas).map(f => f.map(c => '"' + String(c === null || c === undefined ? '' : c).replace(/"/g, '""') + '"').join(';')).join('\r\n');
   return Utilities.newBlob('﻿' + csv, 'text/csv', 'cartera_' + hoyISO_() + '.csv');
 }
@@ -438,6 +764,7 @@ function informeDiarioAutomatico() {
   const dia = Number(Utilities.formatDate(new Date(), CONFIG.ZONA, 'u')); // 1=lunes ... 7=domingo
   if (dia === 6 && !CONFIG.ENVIAR_SABADOS) return;
   if (dia === 7 && !CONFIG.ENVIAR_DOMINGOS) return;
+  try { const imp = importarCarteraAutomatica(!PropertiesService.getScriptProperties().getProperty('PORTAL_ULTIMA') || PropertiesService.getScriptProperties().getProperty('PORTAL_ULTIMA').indexOf(hoyISO_()) !== 0); if (imp.errores.length) console.warn(imp.errores.join('\n')); } catch (e) { console.error('Importacion', e); }
   try { enviarInformeCartera(); } catch (e) { console.error('Informe cartera', e); avisarError_('informe de cartera', e); }
   try {
     if (leerAcuerdos_().length) enviarInformeAcuerdos();
@@ -451,8 +778,9 @@ function avisarError_(que, e) {
 function asegurarDisparador_() {
   try {
     const props = PropertiesService.getScriptProperties();
-    const clave = 'DISPARADOR_' + CONFIG.HORA_INFORME;
-    if (props.getProperty(clave) && ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'informeDiarioAutomatico')) return true;
+    const clave = 'DISPARADORES_V2_' + CONFIG.HORA_INFORME;
+    const tr = ScriptApp.getProjectTriggers().map(t => t.getHandlerFunction());
+    if (props.getProperty(clave) && tr.indexOf('informeDiarioAutomatico') >= 0 && tr.indexOf('importarCarteraAutomatica') >= 0) return true;
     instalarDisparadores();
     props.setProperty(clave, new Date().toISOString());
     return true;
@@ -461,10 +789,26 @@ function asegurarDisparador_() {
 
 /** (Opcional) instala o reinstala el envio automatico diario. El Web App ya lo hace solo. */
 function instalarDisparadores() {
-  ScriptApp.getProjectTriggers().filter(t => t.getHandlerFunction() === 'informeDiarioAutomatico').forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.getProjectTriggers().filter(t => ['informeDiarioAutomatico', 'importarCarteraAutomatica'].indexOf(t.getHandlerFunction()) >= 0).forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('informeDiarioAutomatico').timeBased().everyDays(1).atHour(CONFIG.HORA_INFORME).inTimezone(CONFIG.ZONA).create();
+  ScriptApp.newTrigger('importarCarteraAutomatica').timeBased().everyHours(1).create();
+  carpetaImportar_();
   libro_(); // crea la hoja si no existe
   return 'Disparador diario instalado a las ' + CONFIG.HORA_INFORME + ':00 (' + CONFIG.ZONA + '). Hoja: ' + libro_().getUrl();
+}
+
+/**
+ * EJECUTAR UNA VEZ desde el editor (con juridico@) despues de pegar esta version:
+ * autoriza los permisos nuevos (Drive, Gmail y conexion al portal), programa todo
+ * y prueba la descarga. El resultado queda en el "Registro de ejecucion".
+ */
+function configurarTodo() {
+  console.log(instalarDisparadores());
+  console.log('Carpeta de carga automatica: ' + carpetaImportar_().getUrl());
+  const props = PropertiesService.getScriptProperties();
+  if (!props.getProperty('PORTAL_USUARIO')) console.warn('Falta PORTAL_USUARIO / PORTAL_CLAVE en Propiedades del script: la descarga del portal queda desactivada.');
+  console.log('Importacion: ' + JSON.stringify(importarCarteraAutomatica(true)));
+  tocarVersion_();
 }
 
 /** Prueba manual: envia ambos informes ya mismo. */

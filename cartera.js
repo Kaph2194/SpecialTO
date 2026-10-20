@@ -19,12 +19,13 @@
 // URL del Web App de cartera (Apps Script implementado desde juridico@).
 // Se puede pegar aqui (queda para todos los equipos) o desde el boton
 // "⚙️ Conectar" de la vista Cartera (queda guardada en ese navegador).
-const CARTERA_WEBAPP_URL_FIJA = 'PEGA_AQUI_LA_URL_DEL_WEBAPP_DE_CARTERA';
+const CARTERA_WEBAPP_URL_FIJA = 'https://script.google.com/macros/s/AKfycby5nBCRwjooN0VU4fUnXfgJr2DRNUpFALZ0Bc-qNTG8t5eKNNu4D_axKt7bd1WjmApt/exec';
 function _urlCarteraGuardada(){ try{ return localStorage.getItem('sc_cartera_url')||''; }catch(e){ return ''; } }
 let CARTERA_WEBAPP_URL = CARTERA_WEBAPP_URL_FIJA.startsWith('https://') ? CARTERA_WEBAPP_URL_FIJA : _urlCarteraGuardada();
 let CARTERA_BACKEND_ACTIVO = /^https:\/\/script\.google(usercontent)?\.com\//.test(CARTERA_WEBAPP_URL);
-// Clave opcional compartida con el backend (debe ser igual a CLAVE en Cartera.gs). Vacia = sin clave.
-const CARTERA_CLAVE = '';
+// Clave de acceso: NO se escribe en el codigo (el repositorio es publico). Si el backend tiene
+// la propiedad CLAVE_APP, la app la pide una vez por navegador y la recuerda.
+function _claveCartera(){ try{ return localStorage.getItem('sc_cartera_clave')||''; }catch(e){ return ''; } }
 
 const CARTERA_CORREOS = {
   cartera:  'juridico@specialcar.com.co',
@@ -35,6 +36,8 @@ const CARTERA_CORREOS = {
 // ===== ESTADO =====
 let cartera = { fechaCorte: (typeof CARTERA_FECHA_CORTE!=='undefined'?CARTERA_FECHA_CORTE:null), archivo: 'CarteraRodamientos (inicial)', registros: (typeof CARTERA_DATA!=='undefined'?JSON.parse(JSON.stringify(CARTERA_DATA)):[]) };
 let acuerdos = [];
+let estadosPlaca = {};          // placa -> {estado, radicado, fecha, usuario}
+let infoCarga = {};             // {cargado, origen, carpeta}
 let carteraTab = 'placas';
 let carteraFiltrada = [];
 let carteraOrden = { campo: 'valorVencido', dir: -1 };
@@ -56,6 +59,26 @@ function sumarPeriodo(iso, periodicidad, n){
 function rangoMora(p){ p=Number(p)||0; if(p<=0) return 'al_dia'; if(p===1) return 'r1'; if(p<=3) return 'r2_3'; if(p<=6) return 'r4_6'; return 'r7'; }
 const RANGOS = { al_dia:'Al día', r1:'1 periodo', r2_3:'2–3 periodos', r4_6:'4–6 periodos', r7:'Más de 6' };
 const RANGO_CLS = { al_dia:'cell-g', r1:'cell-y', r2_3:'cell-o', r4_6:'cell-r', r7:'cell-r cell-rr' };
+
+// ===== ESTADO DE GESTION POR PLACA =====
+const ESTADOS_PLACA = { activo:{t:'Activo',c:'est-activo'}, notificado:{t:'Notificado',c:'est-notificado'}, desvinculacion:{t:'Desvinculación',c:'est-desvinc'}, radicado:{t:'Radicado',c:'est-radicado'} };
+const estadoPlacaDe = placa => (estadosPlaca[placa]||{}).estado||'activo';
+const radicadoDe = placa => (estadosPlaca[placa]||{}).radicado||'';
+const textoEstadoPlaca = placa => ESTADOS_PLACA[estadoPlacaDe(placa)].t+(radicadoDe(placa)?` #${radicadoDe(placa)}`:'');
+function cambiarEstadoPlaca(placa, estado){
+  const ant=estadosPlaca[placa]||{};
+  estadosPlaca[placa]={...ant,estado,radicado:estado==='radicado'?(ant.radicado||''):'',fecha:new Date().toISOString(),usuario:CARTERA_CORREOS.cartera};
+  guardarEstadosLS(); renderCartera();
+  if(estado==='radicado'&&!estadosPlaca[placa].radicado){ const i=document.getElementById('rad_'+placa); if(i){ i.focus(); } mostrarToast(`Escribe el número de radicado de ${placa}`,'info'); }
+  sincronizarEstado(placa);
+}
+function cambiarRadicado(placa, valor){
+  const e=estadosPlaca[placa]; if(!e||e.estado!=='radicado') return;
+  e.radicado=String(valor||'').trim(); e.fecha=new Date().toISOString();
+  guardarEstadosLS();
+  const inp=document.getElementById('rad_'+placa); if(inp) inp.classList.toggle('rad-falta',!e.radicado);
+  sincronizarEstado(placa);
+}
 
 // ===== LOGICA DE ACUERDOS =====
 function totalesAcuerdo(a){
@@ -84,6 +107,9 @@ function acuerdoActivoDePlaca(placa){ return acuerdos.find(a=>a.placa===placa &&
 function guardarCarteraLS(){
   try{ localStorage.setItem('sc_cartera_v1',JSON.stringify(cartera)); }catch(e){ console.warn('LS cartera',e); }
 }
+function guardarEstadosLS(){
+  try{ localStorage.setItem('sc_estados_placa_v1',JSON.stringify(estadosPlaca)); }catch(e){ console.warn('LS estados',e); }
+}
 function guardarAcuerdosLS(){
   try{ localStorage.setItem('sc_acuerdos_v1',JSON.stringify(acuerdos)); }catch(e){ console.warn('LS acuerdos',e); }
 }
@@ -93,33 +119,102 @@ function cargarCarteraLS(){
     if(c){ const p=JSON.parse(c); if(p&&Array.isArray(p.registros)&&p.registros.length&&(!cartera.fechaCorte||!p.fechaCorte||p.fechaCorte>=cartera.fechaCorte)) cartera=p; }
     const a=localStorage.getItem('sc_acuerdos_v1');
     if(a){ const p=JSON.parse(a); if(Array.isArray(p)) acuerdos=p; }
+    const e=localStorage.getItem('sc_estados_placa_v1');
+    if(e){ const p=JSON.parse(e); if(p&&typeof p==='object') estadosPlaca=p; }
   }catch(e){ console.warn(e); }
 }
 
 // ===== BACKEND DE CARTERA =====
-async function llamarBackendCartera(payload){
+let _pidiendoClave=null;
+async function llamarBackendCartera(payload,_reintento){
   if(!CARTERA_BACKEND_ACTIVO) throw new Error('backend de cartera no configurado');
-  const resp=await fetch(CARTERA_WEBAPP_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({...payload,clave:CARTERA_CLAVE})});
+  const resp=await fetch(CARTERA_WEBAPP_URL,{method:'POST',headers:{'Content-Type':'text/plain;charset=utf-8'},body:JSON.stringify({...payload,clave:_claveCartera()})});
   const data=await resp.json();
-  if(data&&data.error) throw new Error(data.error);
+  if(data&&data.error==='clave invalida'&&!_reintento){
+    // Una sola ventana aunque haya varias llamadas en curso
+    _pidiendoClave=_pidiendoClave||new Promise(res=>setTimeout(()=>{
+      const c=prompt('Clave de acceso a la cartera (la entrega juridico@specialcar.com.co). Se pide una sola vez en este navegador:');
+      try{ if(c) localStorage.setItem('sc_cartera_clave',c.trim()); }catch(e){}
+      res(!!c);
+    },0)).finally(()=>setTimeout(()=>{_pidiendoClave=null;},0));
+    if(await _pidiendoClave) return llamarBackendCartera(payload,true);
+  }
+  if(data&&data.error) throw new Error(data.error==='clave invalida'?'Clave de acceso incorrecta':data.error);
   return data;
 }
-async function cargarCarteraDesdeBackend(){
+// ===== SINCRONIZACION ENTRE NAVEGADORES =====
+// La hoja de Google de juridico@ es la fuente de verdad. Al abrir la app, cada minuto,
+// y al volver a la pestaña, se pregunta al backend si hubo cambios (version) y solo
+// entonces se descarga todo. Los cambios propios que aun no se confirman se protegen.
+let _versionBackend=null, _ultimaSync=null, _syncEnCurso=null;
+const _acuerdosPendientes=new Set(), _estadosPendientes=new Set();
+async function cargarCarteraDesdeBackend(forzar){
   if(!CARTERA_BACKEND_ACTIVO) return;
+  if(_syncEnCurso) return _syncEnCurso;
+  _syncEnCurso=(async()=>{
+    try{
+      const r=await llamarBackendCartera({accion:'obtenerCartera',version:forzar?null:_versionBackend});
+      _ultimaSync=new Date();
+      if(r.sinCambios){ actualizarBadgeBackend(true); return; }
+      _cuentaBackend=r.cuenta||_cuentaBackend;
+      _versionBackend=r.version||null;
+      infoCarga={cargado:r.cargado,origen:r.origen,carpeta:r.carpeta};
+      let cambio=false;
+      if(r.registros&&r.registros.length){
+        if(cartera.registros.length&&cartera.fechaCorte&&r.fechaCorte&&cartera.fechaCorte>r.fechaCorte&&!cartera._delBackend){
+          // este navegador tiene un corte mas nuevo que nunca se subio: se sube
+          llamarBackendCartera({accion:'guardarCartera',fechaCorte:cartera.fechaCorte,archivo:cartera.archivo,registros:cartera.registros}).catch(e=>console.warn(e));
+        }else{ cartera={fechaCorte:r.fechaCorte,archivo:r.archivo,registros:r.registros,_delBackend:true}; guardarCarteraLS(); cambio=true; }
+      }else if(cartera.registros.length){
+        llamarBackendCartera({accion:'guardarCartera',fechaCorte:cartera.fechaCorte,archivo:cartera.archivo,registros:cartera.registros}).then(()=>mostrarToast('Cartera de este navegador subida a la hoja compartida','success')).catch(e=>console.warn(e));
+      }
+      if(Array.isArray(r.acuerdos)){
+        const remotos=new Map(r.acuerdos.map(x=>[x.id,x]));
+        const soloLocales=acuerdos.filter(x=>!remotos.has(x.id));
+        acuerdos=r.acuerdos.map(x=>_acuerdosPendientes.has(x.id)?(acuerdos.find(y=>y.id===x.id)||x):x).concat(soloLocales);
+        guardarAcuerdosLS(); cambio=true;
+        soloLocales.filter(x=>!_acuerdosPendientes.has(x.id)).forEach(x=>sincronizarAcuerdo(x));
+      }
+      if(r.estados&&typeof r.estados==='object'){
+        const locales=estadosPlaca; estadosPlaca={...r.estados};
+        _estadosPendientes.forEach(p=>{ if(locales[p]) estadosPlaca[p]=locales[p]; });
+        // estados guardados solo en este navegador (antes de conectar) se suben
+        Object.keys(locales).filter(p=>!r.estados[p]&&!_estadosPendientes.has(p)).forEach(p=>{ estadosPlaca[p]=locales[p]; sincronizarEstado(p); });
+        guardarEstadosLS(); cambio=true;
+      }
+      if(cambio){ cargarEmpresasCartera(); refrescarVistaCartera(); }
+      actualizarBadgeBackend(true);
+    }catch(e){ console.warn('No se pudo leer cartera del backend',e); actualizarBadgeBackend(false); }
+    finally{ _syncEnCurso=null; }
+  })();
+  return _syncEnCurso;
+}
+// Re-pinta sin interrumpir: si hay un modal abierto o se esta escribiendo, espera.
+let _renderPendiente=false;
+function refrescarVistaCartera(){
+  if(vistaActual!=='cartera') return;
+  const ocupado=!document.getElementById('modalCartera').classList.contains('hidden')||(document.activeElement&&document.activeElement.closest&&document.activeElement.closest('#vista-cartera')&&/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName));
+  if(ocupado){ _renderPendiente=true; return; }
+  _renderPendiente=false; renderCartera();
+}
+function sincronizarEstado(placa){
+  if(!CARTERA_BACKEND_ACTIVO) return Promise.resolve();
+  _estadosPendientes.add(placa);
+  const e=estadosPlaca[placa]||{estado:'activo'};
+  return llamarBackendCartera({accion:'guardarEstadoPlaca',placa,estado:e.estado,radicado:e.radicado,usuario:CARTERA_CORREOS.cartera})
+    .then(()=>{ _estadosPendientes.delete(placa); _versionBackend=null; actualizarBadgeBackend(true); })
+    .catch(err=>{ console.warn(err); _estadosPendientes.delete(placa); actualizarBadgeBackend(false);
+      mostrarToast(/desconocida/.test(err.message)?'El backend no tiene la versión nueva: actualiza Cartera.gs (ver CARTERA_SETUP.md)':`El estado de ${placa} quedó en este navegador, pero no se pudo guardar en la hoja compartida`,'error'); });
+}
+async function importarDelPortalAhora(){
+  if(!CARTERA_BACKEND_ACTIVO){ mostrarToast('Requiere la conexión con el backend','error'); return; }
+  mostrarToast('Buscando el reporte en el portal, el correo y la carpeta… (puede tardar 1 minuto)','info');
   try{
-    const r=await llamarBackendCartera({accion:'obtenerCartera'});
-    _cuentaBackend=r.cuenta||_cuentaBackend;
-    if(r.registros&&r.registros.length&&(!cartera.fechaCorte||!r.fechaCorte||r.fechaCorte>=cartera.fechaCorte)){ cartera={fechaCorte:r.fechaCorte,archivo:r.archivo,registros:r.registros}; guardarCarteraLS(); }
-    if(Array.isArray(r.acuerdos)){
-      // Acuerdos creados en este navegador en modo local (antes de conectar el backend) se suben ahora
-      const remotos=new Set(r.acuerdos.map(x=>x.id));
-      const soloLocales=acuerdos.filter(x=>!remotos.has(x.id));
-      acuerdos=r.acuerdos.concat(soloLocales); guardarAcuerdosLS();
-      soloLocales.forEach(x=>sincronizarAcuerdo(x));
-    }
-    if(vistaActual==='cartera') renderCartera();
-    actualizarBadgeBackend(true);
-  }catch(e){ console.warn('No se pudo leer cartera del backend',e); actualizarBadgeBackend(false); }
+    const r=await llamarBackendCartera({accion:'importarAhora'});
+    await cargarCarteraDesdeBackend(true);
+    if(r.cargado) mostrarToast(`Cartera actualizada: ${r.cargado.archivo} · corte ${fmtD(r.cargado.fechaCorte)} · ${r.cargado.placas} placas`,'success');
+    else mostrarToast(r.errores&&r.errores.length?`No se cargó: ${r.errores[0]}`:'No había reportes nuevos','error');
+  }catch(e){ mostrarToast(/desconocida/.test(e.message)?'El backend no tiene la versión nueva: actualiza Cartera.gs':'Error: '+e.message,'error'); }
 }
 // Sincroniza un acuerdo con el backend (Sheet + calendarios). Las llamadas de un
 // mismo acuerdo se encadenan para que la segunda ya lleve los eventId que devolvio
@@ -129,6 +224,7 @@ function sincronizarAcuerdo(a){
   guardarAcuerdosLS();
   if(!CARTERA_BACKEND_ACTIVO) return Promise.resolve();
   const id=a.id;
+  _acuerdosPendientes.add(id);
   _colaSync[id]=(_colaSync[id]||Promise.resolve()).then(async()=>{
     const actual=acuerdos.find(x=>x.id===id); if(!actual) return;
     const enviados=(actual._eventosAEliminar||[]).slice();
@@ -142,18 +238,21 @@ function sincronizarAcuerdo(a){
         if(loc._eventosAEliminar){ loc._eventosAEliminar=loc._eventosAEliminar.filter(x=>!enviados.includes(x)); if(!loc._eventosAEliminar.length) delete loc._eventosAEliminar; }
         guardarAcuerdosLS();
       }
+      _acuerdosPendientes.delete(id); _versionBackend=null;
       mostrarToast(`Acuerdo ${actual.placa} sincronizado en Sheets y calendarios`,'success');
       actualizarBadgeBackend(true);
       if(vistaActual==='cartera') renderCartera();
-    }catch(e){ console.warn(e); actualizarBadgeBackend(false); mostrarToast('El acuerdo quedó guardado en este navegador, pero no se pudo sincronizar con el backend','error'); }
+    }catch(e){ console.warn(e); _acuerdosPendientes.delete(id); actualizarBadgeBackend(false); mostrarToast('El acuerdo quedó guardado en este navegador, pero no se pudo sincronizar con el backend','error'); }
   });
   return _colaSync[id];
 }
 function actualizarBadgeBackend(ok){
   const el=document.getElementById('cartera-backend-info'); if(!el) return;
   if(!CARTERA_BACKEND_ACTIVO){ el.innerHTML='<span class="dot dot-y"></span> Sin conexión automática (calendario y correos) — <button class="link-btn" onclick="conectarBackendCartera()">⚙️ Conectar</button>'; return; }
-  el.innerHTML=ok===false?'<span class="dot dot-r"></span> Backend sin respuesta — usando datos locales · <button class="link-btn" onclick="conectarBackendCartera()">⚙️ Revisar conexión</button>'
-    :`<span class="dot dot-g"></span> Automático: calendario y correos desde ${esc(_cuentaBackend||CARTERA_CORREOS.cartera)}${CARTERA_WEBAPP_URL_FIJA.startsWith('https://')?'':' · <button class="link-btn" onclick="conectarBackendCartera()">⚙️</button>'}`;
+  const hora=_ultimaSync?_ultimaSync.toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'}):'';
+  const carga=infoCarga.cargado?` · Última carga ${new Date(infoCarga.cargado).toLocaleString('es-CO',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}${infoCarga.origen?' ('+esc(infoCarga.origen)+')':''}`:'';
+  el.innerHTML=ok===false?'<span class="dot dot-r"></span> Sin respuesta del backend — mostrando lo último guardado en este navegador · <button class="link-btn" onclick="cargarCarteraDesdeBackend(true)">Reintentar</button>'
+    :`<span class="dot dot-g"></span> Sincronizado${hora?' '+hora:''} · calendario y correos desde ${esc(_cuentaBackend||CARTERA_CORREOS.cartera)}${carga}${infoCarga.carpeta?` · <a class="link-btn" href="${esc(infoCarga.carpeta)}" target="_blank" rel="noopener">📁 Carpeta de carga</a>`:''}`;
 }
 let _cuentaBackend='';
 // Conecta la app con el Web App de cartera sin editar codigo: pide la URL, la prueba y la guarda.
@@ -221,6 +320,13 @@ function renderCartera(){
       <span class="cell-doc ${RANGO_CLS[k]}">${t}</span><strong>${porR[k].n}</strong><small>${fmtCOP(porR[k].v)}</small>
     </button>`).join('');
 
+  // Conteo por estado de gestion (en el filtro y en la tarjeta de rangos)
+  const porEst={}; Object.keys(ESTADOS_PLACA).forEach(k=>porEst[k]={n:0,v:0});
+  regs.forEach(r=>{ const k=estadoPlacaDe(r.placa); porEst[k].n++; porEst[k].v+=r.valorVencido; });
+  const selE=document.getElementById('cFiltroEstado'), valE=selE.value;
+  selE.innerHTML='<option value="">Estado: todos</option>'+Object.entries(ESTADOS_PLACA).map(([k,o])=>`<option value="${k}">${o.t} (${porEst[k].n})</option>`).join(''); selE.value=valE;
+  document.getElementById('cartera-estados').innerHTML=Object.entries(ESTADOS_PLACA).map(([k,o])=>`
+    <button class="estado-chip ${valE===k?'activo':''}" onclick="filtrarCarteraEstado('${k}')"><span class="sel-estado ${o.c}">${o.t}</span><strong>${porEst[k].n}</strong><small>${fmtCOP(porEst[k].v)}</small></button>`).join('');
   ['placas','acuerdos','agenda'].forEach(t=>{
     document.getElementById(`ctab-${t}`).classList.toggle('activo',carteraTab===t);
     document.getElementById(`cpanel-${t}`).classList.toggle('hidden',carteraTab!==t);
@@ -241,7 +347,8 @@ function cargarEmpresasCartera(){
 }
 function filtrarCarteraEmpresa(e){ carteraTab='placas'; document.getElementById('cFiltroEmpresa').value=e; renderCartera(); }
 function filtrarCarteraRango(k){ carteraTab='placas'; const s=document.getElementById('cFiltroRango'); s.value=s.value===k?'':k; if(k==='al_dia'&&s.value) document.getElementById('cSoloSaldo').checked=false; renderCartera(); }
-function limpiarFiltrosCartera(){ ['cBuscador','cFiltroEmpresa','cFiltroRango','cFiltroAcuerdo'].forEach(id=>document.getElementById(id).value=''); document.getElementById('cSoloSaldo').checked=true; renderCartera(); }
+function filtrarCarteraEstado(k){ carteraTab='placas'; const s=document.getElementById('cFiltroEstado'); s.value=s.value===k?'':k; if(s.value) document.getElementById('cSoloSaldo').checked=false; renderCartera(); }
+function limpiarFiltrosCartera(){ ['cBuscador','cFiltroEmpresa','cFiltroRango','cFiltroAcuerdo','cFiltroEstado'].forEach(id=>document.getElementById(id).value=''); document.getElementById('cSoloSaldo').checked=true; renderCartera(); }
 function ordenarCartera(campo){ carteraOrden = carteraOrden.campo===campo?{campo,dir:-carteraOrden.dir}:{campo,dir:campo==='placa'||campo==='nombre'||campo==='empresa'?1:-1}; renderTablaCartera(); }
 
 function aplicarFiltrosCartera(){
@@ -250,12 +357,14 @@ function aplicarFiltrosCartera(){
   const rango=document.getElementById('cFiltroRango').value;
   const fa=document.getElementById('cFiltroAcuerdo').value;
   const solo=document.getElementById('cSoloSaldo').checked;
+  const fest=document.getElementById('cFiltroEstado').value;
   const {campo,dir}=carteraOrden;
   return cartera.registros.filter(r=>{
     if(solo&&!(r.valorVencido>0)&&rango!=='al_dia') return false;
-    if(q&&!normalizarTexto(`${r.placa} ${r.nombre} ${r.identificacion} ${r.numInterno} ${r.empresa} ${r.celular}`).includes(q)) return false;
+    if(q&&!normalizarTexto(`${r.placa} ${r.nombre} ${r.identificacion} ${r.numInterno} ${r.empresa} ${r.celular} ${radicadoDe(r.placa)}`).includes(q)) return false;
     if(emp&&r.empresa!==emp) return false;
     if(rango&&rangoMora(r.periodosVencidos)!==rango) return false;
+    if(fest&&estadoPlacaDe(r.placa)!==fest) return false;
     if(fa){ const ac=acuerdoActivoDePlaca(r.placa); if(fa==='con'&&!ac) return false; if(fa==='sin'&&ac) return false; if(fa==='incumplido'&&!(ac&&estadoAcuerdo(ac)==='incumplido')) return false; }
     return true;
   }).sort((a,b)=>{ const x=a[campo],y=b[campo]; return (typeof x==='number'?x-y:String(x).localeCompare(String(y)))*dir; });
@@ -267,8 +376,8 @@ function renderTablaCartera(){
   document.getElementById('c-count').textContent=`${carteraFiltrada.length} placas · ${fmtCOP(tot)}`;
   document.querySelectorAll('#tablaCartera th[data-ord]').forEach(th=>{ th.classList.toggle('ord-activo',th.dataset.ord===carteraOrden.campo); th.dataset.dir=carteraOrden.dir>0?'▲':'▼'; });
   const tb=document.getElementById('tbodyCartera');
-  if(!cartera.registros.length){ tb.innerHTML=`<tr><td colspan="11" class="empty-msg">No hay cartera cargada.<br><br><button class="btn btn-dark" onclick="document.getElementById('inputArchivoCartera').click()">📤 Cargar archivo CarteraRodamientos</button></td></tr>`; return; }
-  if(!carteraFiltrada.length){ tb.innerHTML='<tr><td colspan="11" class="empty-msg">Sin resultados</td></tr>'; return; }
+  if(!cartera.registros.length){ tb.innerHTML=`<tr><td colspan="13" class="empty-msg">No hay cartera cargada.<br><br><button class="btn btn-dark" onclick="document.getElementById('inputArchivoCartera').click()">📤 Cargar archivo CarteraRodamientos</button></td></tr>`; return; }
+  if(!carteraFiltrada.length){ tb.innerHTML='<tr><td colspan="13" class="empty-msg">Sin resultados</td></tr>'; return; }
   tb.innerHTML=carteraFiltrada.map(r=>{
     const k=rangoMora(r.periodosVencidos), ac=acuerdoActivoDePlaca(r.placa);
     const e=ac?estadoAcuerdo(ac):null;
@@ -284,6 +393,8 @@ function renderTablaCartera(){
       <td class="td-sub2">${esc(r.ultimoPeriodo)}</td>
       <td style="text-align:center"><span class="cell-doc ${RANGO_CLS[k]}">${r.periodosVencidos}</span>${pst}</td>
       <td class="td-valor">${fmtCOP(r.valorVencido)}</td>
+      <td class="td-estado"><select class="sel-estado ${ESTADOS_PLACA[estadoPlacaDe(r.placa)].c}" onchange="cambiarEstadoPlaca('${esc(r.placa)}',this.value)" title="${estadosPlaca[r.placa]&&estadosPlaca[r.placa].fecha?'Cambiado '+esc(new Date(estadosPlaca[r.placa].fecha).toLocaleString('es-CO')):''}">${Object.entries(ESTADOS_PLACA).map(([k,o])=>`<option value="${k}" ${estadoPlacaDe(r.placa)===k?'selected':''}>${o.t}</option>`).join('')}</select></td>
+      <td class="td-radicado">${estadoPlacaDe(r.placa)==='radicado'?`<input id="rad_${esc(r.placa)}" class="inp-radicado ${radicadoDe(r.placa)?'':'rad-falta'}" placeholder="N° radicado" value="${esc(radicadoDe(r.placa))}" onchange="cambiarRadicado('${esc(r.placa)}',this.value)"/>`:'<span class="cell-n">—</span>'}</td>
       <td style="text-align:center">${acTxt}</td>
       <td class="td-acc">
         ${ac?`<button class="btn-notif" onclick="abrirSeguimiento('${ac.id}')">Seguimiento</button>`:(r.valorVencido>0?`<button class="btn-notif btn-acuerdo" onclick="abrirNuevoAcuerdo('${esc(r.placa)}')">+ Acuerdo</button>`:'')}
@@ -376,7 +487,7 @@ function abrirModalCartera(titulo,html,botones){
   document.getElementById('modalCarteraFooter').innerHTML=`<button class="btn btn-outline-dark" onclick="cerrarModalCartera()">Cerrar</button>`+(botones||'');
   document.getElementById('modalCartera').classList.remove('hidden');
 }
-function cerrarModalCartera(){ document.getElementById('modalCartera').classList.add('hidden'); _acuerdoEnEdicion=null; }
+function cerrarModalCartera(){ document.getElementById('modalCartera').classList.add('hidden'); _acuerdoEnEdicion=null; if(_renderPendiente) setTimeout(refrescarVistaCartera,50); }
 
 // ===== CREAR / EDITAR ACUERDO =====
 function abrirNuevoAcuerdo(placa){
@@ -634,7 +745,7 @@ function procesarArchivoCartera(file){
       const despues=regs.reduce((s,r)=>s+r.valorVencido,0);
       mostrarToast(`Cartera cargada: ${regs.length} placas · ${fmtCOP(despues)} (${despues>=antes?'+':'−'}${fmtCOP(Math.abs(despues-antes))} vs. anterior)`,'success');
       if(CARTERA_BACKEND_ACTIVO){
-        try{ await llamarBackendCartera({accion:'guardarCartera',fechaCorte:cartera.fechaCorte,archivo:file.name,registros:regs}); mostrarToast('Cartera guardada en la hoja compartida (base del informe diario)','success'); actualizarBadgeBackend(true); }
+        try{ await llamarBackendCartera({accion:'guardarCartera',fechaCorte:cartera.fechaCorte,archivo:file.name,registros:regs}); cartera._delBackend=true; _versionBackend=null; guardarCarteraLS(); mostrarToast('Cartera guardada en la hoja compartida (base del informe diario)','success'); actualizarBadgeBackend(true); }
         catch(err){ console.warn(err); mostrarToast('La cartera se cargó aquí, pero no se pudo guardar en el backend','error'); actualizarBadgeBackend(false); }
       }
     }catch(err){ console.error(err); mostrarToast('No se pudo leer el archivo de cartera','error'); }
@@ -660,8 +771,8 @@ function htmlInformeCartera(){
   <h2>Resumen por empresa</h2><table><thead><tr><th>Empresa</th><th>Placas</th><th style="text-align:right">Valor vencido</th></tr></thead><tbody>
   ${d.porEmp.map(([e,o])=>`<tr><td>${esc(e)}</td><td>${o.n}</td><td style="text-align:right">${fmtCOP(o.v)}</td></tr>`).join('')}
   <tr><td><b>TOTAL</b></td><td><b>${d.conSaldo.length}</b></td><td style="text-align:right"><b>${fmtCOP(d.total)}</b></td></tr></tbody></table>
-  <h2>Detalle por placa (${d.conSaldo.length})</h2><table><thead><tr><th>Placa</th><th>Afiliado</th><th>Empresa</th><th>Último periodo pago</th><th># Per.</th><th style="text-align:right">Valor vencido</th><th>Acuerdo</th></tr></thead><tbody>
-  ${d.conSaldo.map(r=>{const ac=acuerdoActivoDePlaca(r.placa);return `<tr><td><b>${esc(r.placa)}</b></td><td>${esc(r.nombre)}</td><td>${esc(r.empresa)}</td><td>${esc(r.ultimoPeriodo)}</td><td>${r.periodosVencidos}</td><td style="text-align:right">${fmtCOP(r.valorVencido)}</td><td>${ac?ESTADO_AC[estadoAcuerdo(ac)].t:'—'}</td></tr>`;}).join('')}
+  <h2>Detalle por placa (${d.conSaldo.length})</h2><table><thead><tr><th>Placa</th><th>Afiliado</th><th>Empresa</th><th>Último periodo pago</th><th># Per.</th><th style="text-align:right">Valor vencido</th><th>Estado</th><th>Acuerdo</th></tr></thead><tbody>
+  ${d.conSaldo.map(r=>{const ac=acuerdoActivoDePlaca(r.placa);return `<tr><td><b>${esc(r.placa)}</b></td><td>${esc(r.nombre)}</td><td>${esc(r.empresa)}</td><td>${esc(r.ultimoPeriodo)}</td><td>${r.periodosVencidos}</td><td style="text-align:right">${fmtCOP(r.valorVencido)}</td><td>${esc(textoEstadoPlaca(r.placa))}</td><td>${ac?ESTADO_AC[estadoAcuerdo(ac)].t:'—'}</td></tr>`;}).join('')}
   </tbody></table>`;
 }
 function htmlInformeAcuerdos(){
@@ -725,8 +836,8 @@ async function enviarInforme(tipo){
 
 // ===== CSV =====
 function exportarCarteraCSV(){
-  const cols=['Placa','N Interno','Identificacion','Afiliado','Celular','Correo','Empresa','Clase','Ultimo periodo pago','# Periodos vencidos','$ Valor vencido','Acuerdo','Saldo acuerdo','Proximo compromiso'];
-  const rows=(carteraFiltrada.length?carteraFiltrada:cartera.registros).map(r=>{const ac=acuerdoActivoDePlaca(r.placa),t=ac&&totalesAcuerdo(ac);return [r.placa,r.numInterno,r.identificacion,r.nombre,r.celular,r.correo,r.empresa,r.clase,r.ultimoPeriodo,r.periodosVencidos,r.valorVencido,ac?ESTADO_AC[estadoAcuerdo(ac)].t:'',t?t.saldo:'',t&&t.proximo?t.proximo.fecha:''];});
+  const cols=['Placa','N Interno','Identificacion','Afiliado','Celular','Correo','Empresa','Clase','Ultimo periodo pago','# Periodos vencidos','$ Valor vencido','Estado','N Radicado','Acuerdo','Saldo acuerdo','Proximo compromiso'];
+  const rows=(carteraFiltrada.length?carteraFiltrada:cartera.registros).map(r=>{const ac=acuerdoActivoDePlaca(r.placa),t=ac&&totalesAcuerdo(ac);return [r.placa,r.numInterno,r.identificacion,r.nombre,r.celular,r.correo,r.empresa,r.clase,r.ultimoPeriodo,r.periodosVencidos,r.valorVencido,ESTADOS_PLACA[estadoPlacaDe(r.placa)].t,radicadoDe(r.placa),ac?ESTADO_AC[estadoAcuerdo(ac)].t:'',t?t.saldo:'',t&&t.proximo?t.proximo.fecha:''];});
   const csv=[cols,...rows].map(r=>r.map(c=>`"${String(c??'').replace(/"/g,'""')}"`).join(';')).join('\n');
   const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'})); a.download=`cartera_${hoyISO()}.csv`; a.click();
   mostrarToast('CSV de cartera exportado','success');
@@ -736,5 +847,8 @@ function exportarCarteraCSV(){
 document.addEventListener('DOMContentLoaded',()=>{
   cargarCarteraLS(); cargarEmpresasCartera(); actualizarBadgeBackend();
   document.getElementById('modalCartera').addEventListener('click',e=>{ if(e.target.id==='modalCartera') cerrarModalCartera(); });
-  cargarCarteraDesdeBackend();
+  cargarCarteraDesdeBackend(true);
+  setInterval(()=>{ if(document.visibilityState==='visible') cargarCarteraDesdeBackend(); },60000);
+  document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='visible') cargarCarteraDesdeBackend(); });
+  document.addEventListener('focusout',()=>setTimeout(()=>{ if(_renderPendiente) refrescarVistaCartera(); },300));
 });
