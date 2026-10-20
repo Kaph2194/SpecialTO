@@ -49,7 +49,11 @@ const CONFIG = {
   HORAS_PORTAL: [6, 12, 17],       // horas del dia en que se descarga del portal (la de 6 queda lista para el informe de las 7)
   // Parque automotor (vencimientos): un reporte por empresa que se consolida solo
   PORTAL_PARQUE: '/Reportes/ParqueAutomotor',  // pagina del reporte "Listado de parque automotor"
-  PORTAL_PARQUE_URLS: [],          // opcional: URLs exactas de descarga (una por empresa) si la deteccion automatica no las encuentra
+  PORTAL_PARQUE_URLS: [],
+  // Filtros que se eligen en el formulario del reporte (por texto de la opcion), igual que a mano
+  PORTAL_FILTROS: {
+    '/Reportes/CarteraRodamiento': { estado: 'Activos' }   // Fecha corte = hoy, Empresa = Todas, Estado = Activos
+  },          // opcional: URLs exactas de descarga (una por empresa) si la deteccion automatica no las encuentra
   CLAVE: ''                        // NO escribirla aqui: usar la propiedad del script CLAVE_APP (la app la pide una vez por navegador)
 };
 
@@ -579,33 +583,59 @@ function nombreDescarga_(r, base) {
   const m = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)/i);
   return m ? decodeURIComponent(m[1]) : (base || 'CarteraRodamientos') + '_' + hoyISO_() + '.xlsx';
 }
-// Posibles formas de pedir el Excel desde la pagina del reporte (enlaces, botones, rutas JS).
-function intentosDescarga_(html, pagina, ruta, extra) {
+// Posibles formas de pedir el Excel desde la pagina del reporte. En el portal SGT el
+// reporte es un formulario de filtros (Fecha corte, Empresa, Placa, Estado) con el
+// boton "Ver Informe"; se envia como lo haria el navegador.
+const PALABRAS_DESCARGA_ = /excel|xls|export|descarg/i;
+const FORM_PROHIBIDO_ = /logout|logoff|salir|cerrar|perfil|password|contrase|eliminar|borrar|delete/i;
+function hoyCO_() { return Utilities.formatDate(new Date(), CONFIG.ZONA, 'dd/MM/yyyy'); }
+function intentosDescarga_(html, pagina, ruta, extra, sinRespaldo) {
   const intentos = []; let m;
   const reA = /<a\b[^>]*href\s*=\s*["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi;
-  if (!extra) while ((m = reA.exec(html))) if (/excel|xls|export|descarg/i.test(m[1] + ' ' + m[2])) intentos.push({ url: absoluta_(m[1].replace(/&amp;/g, '&'), pagina.url), metodo: 'get' });
+  while ((m = reA.exec(html))) if (PALABRAS_DESCARGA_.test(m[1] + ' ' + m[2]) && !/^javascript:/i.test(m[1])) intentos.push({ url: absoluta_(entidades_(m[1]), pagina.url), metodo: 'get', datos: extra || null });
   formularios_(html).forEach(f => {
-    if (f.campos.some(c => c.tipo === 'password')) return;
+    if (f.campos.some(c => c.tipo === 'password') || FORM_PROHIBIDO_.test(f.action)) return;
     const datos = {};
-    f.campos.forEach(c => { if (c.nombre && !/submit|button|checkbox|radio/.test(c.tipo)) datos[c.nombre] = c.valor; if (/fecha|corte/i.test(c.nombre || '') && !c.valor) datos[c.nombre] = hoyISO_(); });
+    f.campos.forEach(c => {
+      if (!c.nombre || /submit|button|checkbox|radio|file/.test(c.tipo)) return;
+      datos[c.nombre] = c.valor;
+      if (/fecha|corte/i.test(c.nombre) && !c.valor) datos[c.nombre] = hoyCO_();
+    });
+    // filtros configurados: el <select> cuyo nombre contiene la clave toma la opcion con ese texto
+    const filtros = CONFIG.PORTAL_FILTROS[ruta] || {};
+    Object.keys(filtros).forEach(k => f.campos.filter(c => c.tipo === 'select' && new RegExp(k, 'i').test(c.nombre || '')).forEach(c => {
+      const o = (c.opciones || []).filter(o => normalizar_(o.texto) === normalizar_(filtros[k]))[0] || (c.opciones || []).filter(o => normalizar_(o.texto).indexOf(normalizar_(filtros[k]).slice(0, 5)) === 0)[0];
+      if (o) datos[c.nombre] = o.valor;
+    }));
     Object.assign(datos, extra || {});
-    const botones = f.campos.filter(c => /submit|button/.test(c.tipo) && /excel|export|descarg/i.test(c.tag));
-    (botones.length ? botones : (extra ? [{ tag: '', nombre: null }] : [])).forEach(b => {
+    // botones: primero los de Excel; si no hay, el de enviar ("Ver Informe"); si tampoco, el formulario tal cual
+    const submits = f.campos.filter(c => /submit|button|image/.test(c.tipo));
+    const excel = submits.filter(c => PALABRAS_DESCARGA_.test(c.tag));
+    const usar = excel.length ? excel : (submits.filter(c => c.tipo !== 'button').length ? submits.filter(c => c.tipo !== 'button') : [{ tag: '', nombre: null }]);
+    usar.forEach(b => {
       const d = Object.assign({}, datos); if (b.nombre) d[b.nombre] = b.valor;
       intentos.push({ url: absoluta_(atributo_(b.tag, 'formaction') || f.action || pagina.url, pagina.url), metodo: f.metodo, datos: d });
     });
   });
-  const reJs = /["'](\/[A-Za-z0-9_\/-]*(?:Export|Excel|Descarg)[A-Za-z0-9_\/-]*)["']/gi;
+  const reJs = /["'](\/[A-Za-z0-9_\/-]*(?:Export|Excel|Descarg|Generar|Informe)[A-Za-z0-9_\/-]*)["']/gi;
   while ((m = reJs.exec(html))) intentos.push({ url: absoluta_(m[1], pagina.url), metodo: 'get', datos: extra || null });
-  intentos.push({ url: CONFIG.PORTAL_BASE + ruta + '/Exportar', metodo: 'get', datos: extra || null }, { url: CONFIG.PORTAL_BASE + ruta + 'Excel', metodo: 'get', datos: extra || null });
+  if (!sinRespaldo) intentos.push({ url: CONFIG.PORTAL_BASE + ruta + '/Exportar', metodo: 'get', datos: extra || null }, { url: CONFIG.PORTAL_BASE + ruta + 'Excel', metodo: 'get', datos: extra || null });
   return intentos;
 }
-function probarIntentos_(jar, intentos, base) {
-  const vistos = {};
+let _registroIntentos = null; // lo llena diagnosticarPortal
+function probarIntentos_(jar, intentos, base, ruta, nivel) {
+  const vistos = probarIntentos_._vistos || (probarIntentos_._vistos = {});
   for (let i = 0; i < intentos.length; i++) {
     const it = intentos[i], k = it.metodo + ' ' + it.url + JSON.stringify(it.datos || ''); if (vistos[k]) continue; vistos[k] = 1;
     const p = it.metodo === 'post' ? pedir_(jar, it.url, { method: 'post', payload: it.datos || {} }) : pedir_(jar, it.datos ? it.url + (it.url.indexOf('?') >= 0 ? '&' : '?') + Object.keys(it.datos).map(x => encodeURIComponent(x) + '=' + encodeURIComponent(it.datos[x])).join('&') : it.url);
+    const h = p.r.getAllHeaders();
+    if (_registroIntentos) _registroIntentos.push(it.metodo.toUpperCase() + ' ' + it.url + (it.datos ? ' ' + JSON.stringify(it.datos).slice(0, 200) : '') + ' → ' + p.code + ' ' + (h['Content-Type'] || h['content-type'] || '') + (h['Content-Disposition'] || h['content-disposition'] ? ' ' + (h['Content-Disposition'] || h['content-disposition']) : '') + ' (' + p.r.getContent().length + ' bytes)');
     if (p.code === 200 && esExcel_(p.r)) return p.r.getBlob().setName(nombreDescarga_(p.r, base));
+    // "Ver Informe" puede devolver una pagina con el informe y su propio boton de Excel
+    if (p.code === 200 && !nivel && /text\/html/i.test(String(h['Content-Type'] || h['content-type'] || ''))) {
+      const b = probarIntentos_(jar, intentosDescarga_(p.r.getContentText(), p, ruta, null, true).filter(x => PALABRAS_DESCARGA_.test(x.url + ' ' + JSON.stringify(x.datos || ''))), base, ruta, 1);
+      if (b) return b;
+    }
   }
   return null;
 }
@@ -629,13 +659,15 @@ function descargarReportes_(ruta, porEmpresa, urlsFijas, base) {
       if (!sel || blobs.length) return;
       sel.opciones.filter(o => o.valor && !/seleccion|todas|todos/i.test(o.texto)).forEach(o => {
         const extra = {}; extra[sel.nombre] = o.valor;
-        const b = probarIntentos_(jar, intentosDescarga_(html, pagina, ruta, extra), base + '_' + o.valor);
+        probarIntentos_._vistos = {};
+        const b = probarIntentos_(jar, intentosDescarga_(html, pagina, ruta, extra), base + '_' + o.valor, ruta);
         if (b) blobs.push(b);
       });
     });
     if (blobs.length) return blobs;
   }
-  const b = probarIntentos_(jar, intentosDescarga_(html, pagina, ruta), base);
+  probarIntentos_._vistos = {};
+  const b = probarIntentos_(jar, intentosDescarga_(html, pagina, ruta), base, ruta);
   if (b) return [b];
   throw new Error('Inició sesión pero no encontró la descarga en Excel de ' + ruta + '. Ejecuta el diagnóstico y comparte el registro, o configura la URL de descarga');
 }
@@ -655,6 +687,12 @@ function diagnosticarPortal(ruta) {
   const enlaces = html.match(/<(a|button)\b[^>]*>[\s\S]{0,80}?<\/(a|button)>/gi) || [];
   console.log('Botones/enlaces: \n' + enlaces.filter(x => /excel|xls|export|descarg|generar|consultar/i.test(x)).map(x => x.replace(/\s+/g, ' ')).join('\n'));
   console.log('Scripts: ' + (html.match(/<script[^>]*src=["'][^"']+["']/gi) || []).join(' '));
+  console.log('Intentando la descarga…');
+  _registroIntentos = [];
+  try { const r = descargarReportes_(ruta, ruta === CONFIG.PORTAL_PARQUE, [], 'Diagnostico'); console.log('DESCARGA OK: ' + r.map(b => b.getName() + ' (' + b.getBytes().length + ' bytes)').join(', ')); }
+  catch (e) { console.log('DESCARGA FALLÓ: ' + e.message); }
+  console.log('Intentos:\n' + _registroIntentos.join('\n'));
+  _registroIntentos = null;
   console.log('Rutas JS: ' + ((html.match(/["']\/[A-Za-z0-9_\/-]{3,}["']/g) || []).filter(x => /report|cartera|parque|export|excel/i.test(x)).join(' ')));
 }
 
