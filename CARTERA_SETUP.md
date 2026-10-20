@@ -23,7 +23,50 @@ Cada compromiso de pago y cada próximo seguimiento se agenda como evento en el 
 
 ---
 
-## Conexión automática (una sola vez, ~5 minutos, desde juridico@)
+## Actualizar a la versión 2 (sincronización, estados y carga automática del portal)
+
+La app ya trae fija la URL del backend, así que **cualquier navegador** muestra la misma cartera, acuerdos y estados (se actualiza sola cada minuto). Para activar lo nuevo hay que reemplazar el código del backend **una vez**, con la sesión de **juridico@specialcar.com.co**:
+
+1. Abrir <https://script.google.com> → proyecto **SpecialCar Cartera**.
+2. En `Código.gs`: seleccionar todo, borrar y pegar el contenido nuevo de [`apps-script/Cartera.gs`](apps-script/Cartera.gs). Guardar 💾.
+3. **Usuario y clave del portal SGT** (no van en el código ni en GitHub): ⚙️ **Configuración del proyecto** → abajo, **Propiedades del script** → **Agregar propiedad del script**:
+   - `PORTAL_USUARIO` = el correo con el que se entra a portal2sgt
+   - `PORTAL_CLAVE` = la contraseña de ese usuario
+   - `CLAVE_APP` = una palabra clave para entrar a la cartera desde la app (**importante**: el repositorio y la URL son públicos; sin esta clave cualquiera que tenga la URL podría leer cédulas, celulares y deudas de los afiliados). La app la pide **una sola vez por navegador**.
+   - **Guardar propiedades del script**.
+4. Volver a **Editor** (`< >`), en la lista de funciones de arriba elegir **`configurarTodo`** → **Ejecutar** → **Revisar permisos** → juridico@ → *Configuración avanzada* → *Ir a SpecialCar Cartera* → **Permitir**. Los permisos nuevos son Drive (leer el Excel), Gmail (leer adjuntos) y conexión a servicios externos (entrar al portal).
+   En el **Registro de ejecución** debe aparecer la carpeta de carga y `"cargado":{...,"placas":666}` (o el número del día). Si aparece un error del portal, ver *Si falla la descarga del portal*.
+5. **Implementar → Gestionar implementaciones** → ✏️ (editar) → *Versión*: **Nueva versión** → **Implementar**. **No crear una implementación nueva**: así la URL sigue siendo la misma que tiene la app.
+
+### Qué queda automático
+
+| Qué | Cuándo |
+|---|---|
+| Descarga del reporte del portal SGT y carga en la app | 6:00, 12:00 y 17:00 (`CONFIG.HORAS_PORTAL`), y antes del informe de las 7:00 |
+| Carga de reportes que lleguen como adjunto al correo de juridico@ | Cada hora |
+| Carga de cualquier Excel que se guarde en la carpeta de Drive **“SpecialCar Cartera - Cargar aqui”** | Cada hora |
+| Botón **🔄 Actualizar desde el portal** en la app | Cuando se pulse |
+| Informe diario de cartera e informe de acuerdos | 7:00 a.m. lunes a sábado |
+| Eventos en calendarios y correos de acuerdos | Al guardar |
+
+Los archivos ya cargados pasan a la subcarpeta *Procesados*; los que no se pudieron leer, a *Con error*. Si llegan varios, se usa el de fecha de corte más reciente.
+
+### Estado de gestión por placa
+
+Cada placa tiene **Estado**: Activo, Notificado, Desvinculación o Radicado. Al elegir **Radicado** aparece el campo **N° radicado** (se marca en rojo mientras esté vacío). El estado se guarda en la pestaña *EstadosPlaca* de la hoja (con historial de cambios), **no se pierde al cargar un reporte nuevo**, se puede filtrar, y sale en los informes y en el CSV.
+
+### Si falla la descarga del portal
+
+El script entra al portal como lo haría una persona (correo y contraseña) y busca el botón de Excel del reporte. Si el portal cambia o el botón no se reconoce:
+
+1. En Apps Script ejecutar **`diagnosticarPortal`** y copiar el *Registro de ejecución* (no muestra la contraseña). Con eso se ajusta la detección.
+2. O bien, en el portal, abrir las herramientas de desarrollador (F12) → pestaña *Red*, pulsar el botón de Excel, copiar la URL de la descarga y pegarla en `CONFIG.PORTAL_URL_DESCARGA`.
+
+Mientras tanto, el reporte se puede cargar guardándolo en la carpeta de Drive, reenviándolo al correo de juridico@ o con **📤 Cargar Cartera**.
+
+---
+
+## Instalación inicial (ya realizada)
 
 Después de este paso **todo es automático**: cada acuerdo, cuota y seguimiento se agenda solo en los calendarios de juridico@ y directortransporte@; cada acuerdo nuevo, pago o anulación envía un correo (CC directortransporte@ y ceo@); y los dos informes salen solos todos los días a las 7:00 a.m.
 
@@ -42,7 +85,7 @@ Después de este paso **todo es automático**: cada acuerdo, cuota y seguimiento
 
 Para que la conexión quede para **todos los equipos** sin repetir el paso 4, pega la URL en `cartera.js` (constante `CARTERA_WEBAPP_URL_FIJA`, al inicio del archivo) y súbelo al repositorio.
 
-Opcional: en `CONFIG` (al inicio de `Cartera.gs`) se puede cambiar la hora del informe, si sale sábados/domingos y si se notifica cada novedad de acuerdos. Para que nadie más pueda escribir en el backend aunque conozca la URL, poner la misma palabra en `CARTERA_CLAVE` (cartera.js) y en `CONFIG.CLAVE` (Cartera.gs).
+Opcional: en `CONFIG` (al inicio de `Cartera.gs`) se puede cambiar la hora del informe, si sale sábados/domingos y si se notifica cada novedad de acuerdos. La clave de acceso se define con la propiedad del script `CLAVE_APP` (nunca en el código).
 
 ### Comprobación
 
