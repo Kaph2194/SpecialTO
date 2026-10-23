@@ -52,8 +52,24 @@ const CONFIG = {
   PORTAL_PARQUE_URLS: [],
   // Filtros que se eligen en el formulario del reporte (por texto de la opcion), igual que a mano
   PORTAL_FILTROS: {
-    '/Reportes/CarteraRodamiento': { estado: 'Activos' }   // Fecha corte = hoy, Empresa = Todas, Estado = Activos
-  },          // opcional: URLs exactas de descarga (una por empresa) si la deteccion automatica no las encuentra
+    '/Reportes/CarteraRodamiento': { estado: 'Activos' },  // Fecha corte = hoy, Empresa = Todas, Estado = Activos
+    '/Reportes/RepDocuAfiliados': { estado: 'Activos' }     // Empresa = Todos, Estado Afiliados = Activos, Detallado, Tipo documento = Todos
+  },
+  // Nombre esperado del archivo de cada reporte (se descarta cualquier otro, p.ej. "Contratos_Total")
+  ARCHIVOS_REPORTE: {
+    '/Reportes/CarteraRodamiento': /cartera|rodamiento/i,
+    '/Reportes/ParqueAutomotor': /parque/i,
+    '/Reportes/ConductoresInfoGral': /conductor/i,
+    '/Reportes/RepDocuAfiliados': /docu|afiliad/i
+  },
+  // ---- FleetSync (repositorio DisponibilidadOP, base de datos Supabase) ----
+  // Los 4 cargues del administrador de FleetSync se hacen solos. Usuario y clave (rol admin o jefe)
+  // van en Propiedades del script: FLEET_USUARIO y FLEET_CLAVE. La URL y la llave publica son las de config.js.
+  FLEET_ACTIVO: true,
+  FLEET_SUPABASE_URL: 'https://yaeknutbljjeetukhefq.supabase.co',
+  FLEET_ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InlhZWtudXRibGpqZWV0dWtoZWZxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUzNjU3NzUsImV4cCI6MjEwMDk0MTc3NX0.ghq4dafj5X1iEt-4_LAWSRaIuxABBorKmo49VXoRsg8',
+  PORTAL_CONDUCTORES: '/Reportes/ConductoresInfoGral',  // Estado de conductores = Activos -> Excel
+  PORTAL_DOCUMENTOS: '/Reportes/RepDocuAfiliados',      // Documentos de afiliados (detallado) -> Excel          // opcional: URLs exactas de descarga (una por empresa) si la deteccion automatica no las encuentra
   CLAVE: ''                        // NO escribirla aqui: usar la propiedad del script CLAVE_APP (la app la pide una vez por navegador)
 };
 
@@ -76,6 +92,7 @@ function doPost(e) {
       case 'guardarGestion':       return json_(guardarGestion_(p.gestion));
       case 'enviarCorreoAfiliado': return json_(enviarCorreoAfiliado_(p));
       case 'importarAhora':        return json_(importarCarteraAutomatica(true));
+      case 'sincronizarFleet':     return json_(sincronizarFleetSync(true));
       case 'obtenerParque':        return json_(obtenerParque_(p));
       case 'guardarParque':        return json_(guardarParque_(p.tablas || [], p.origen || 'Carga manual en la app'));
       case 'guardarGestionVehiculos': return json_(guardarGestionVehiculos_(p.cambios || []));
@@ -700,7 +717,9 @@ function probarIntentos_(jar, intentos, base, ruta, nivel) {
     if (p.code === 200 && esExcel_(p.r)) {
       const nombre = nombreDescarga_(p.r, base);
       // solo se acepta si el archivo es del reporte pedido (p.ej. no "Contratos_Total")
-      if (!/filename/i.test(String(h['Content-Disposition'] || h['content-disposition'] || '')) || normalizar_(nombre).replace(/[^a-z]/g, '').indexOf(tokenReporte_(ruta)) >= 0) return p.r.getBlob().setName(nombre);
+      const esperado = CONFIG.ARCHIVOS_REPORTE[ruta];
+      const nombreOk = esperado ? esperado.test(nombre) : normalizar_(nombre).replace(/[^a-z]/g, '').indexOf(tokenReporte_(ruta)) >= 0;
+      if (!/filename/i.test(String(h['Content-Disposition'] || h['content-disposition'] || '')) || nombreOk) return p.r.getBlob().setName(nombre);
       if (_registroIntentos) _registroIntentos.push('   ↳ descartado: ' + nombre + ' no es del reporte ' + ruta);
       continue;
     }
@@ -913,6 +932,181 @@ function guardarGestionVehiculos_(cambios) {
     return { ok: true, guardados: cambios.length };
   } finally { lock.releaseLock(); }
 }
+
+
+// =====================================================================
+//  FLEETSYNC (repositorio DisponibilidadOP · base de datos Supabase)
+//  Hace automaticamente los mismos 4 cargues que el administrador hace a
+//  mano en FleetSync: base de documentos (DocumentosAfiliados), conductores
+//  (informe general), cartera y consolidado del parque automotor (activos).
+//  Inicia sesion en FleetSync con un usuario de rol admin o jefe, cuyas
+//  credenciales van en Propiedades del script: FLEET_USUARIO y FLEET_CLAVE.
+//  Corre en su propio disparador horario (limite de 6 min por ejecucion).
+// =====================================================================
+function fleetConfigurado_() {
+  const p = PropertiesService.getScriptProperties();
+  return !!(CONFIG.FLEET_ACTIVO && CONFIG.FLEET_SUPABASE_URL && CONFIG.FLEET_ANON_KEY && p.getProperty('FLEET_USUARIO') && p.getProperty('FLEET_CLAVE'));
+}
+function loginFleet_() {
+  const p = PropertiesService.getScriptProperties();
+  const r = UrlFetchApp.fetch(CONFIG.FLEET_SUPABASE_URL + '/auth/v1/token?grant_type=password', {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { apikey: CONFIG.FLEET_ANON_KEY },
+    payload: JSON.stringify({ email: String(p.getProperty('FLEET_USUARIO')).trim(), password: String(p.getProperty('FLEET_CLAVE')).replace(/^\s+|\s+$/g, '') })
+  });
+  const d = JSON.parse(r.getContentText() || '{}');
+  if (r.getResponseCode() !== 200 || !d.access_token) throw new Error('FleetSync rechazó el inicio de sesión (' + (d.error_description || d.msg || d.error || r.getResponseCode()) + '). Revisa FLEET_USUARIO / FLEET_CLAVE');
+  return d.access_token;
+}
+function rpcFleet_(token, funcion, archivo, filas) {
+  const r = UrlFetchApp.fetch(CONFIG.FLEET_SUPABASE_URL + '/rest/v1/rpc/' + funcion, {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    headers: { apikey: CONFIG.FLEET_ANON_KEY, Authorization: 'Bearer ' + token },
+    payload: JSON.stringify({ p_archivo: archivo, p_rows: filas })
+  });
+  const txt = r.getContentText();
+  let d; try { d = JSON.parse(txt); } catch (e) { d = txt; }
+  if (r.getResponseCode() >= 300) throw new Error(funcion + ': ' + ((d && (d.message || d.hint || d.details)) || txt).toString().slice(0, 300));
+  return d;
+}
+
+// --- Convertir filas del Excel en objetos {encabezado: valor}, como hace FleetSync (_sheetJson) ---
+function objetosDesdeFilas_(filas, palabras) {
+  let h = 0;
+  for (let i = 0; i < Math.min(10, filas.length); i++) {
+    const linea = filas[i].map(c => String(c).toLowerCase()).join('|');
+    if (palabras.some(k => linea.indexOf(k.toLowerCase()) >= 0)) { h = i; break; }
+  }
+  const enc = filas[h].map(c => String(c === null || c === undefined ? '' : c).trim());
+  return filas.slice(h + 1).map(f => { const o = {}; enc.forEach((k, j) => { if (k && !(k in o)) o[k] = f[j]; }); return o; });
+}
+function pick_(o, claves) { for (let i = 0; i < claves.length; i++) { const v = o[claves[i]]; if (v !== null && v !== undefined && v !== '') return v; } return ''; }
+function txtF_(v) { return v instanceof Date ? Utilities.formatDate(v, CONFIG.ZONA, 'yyyy-MM-dd') : String(v === null || v === undefined ? '' : v).trim(); }
+function fechaF_(v) { if (!v) return null; const s = isoCelda_(v); return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : null; }
+function tsF_(v) {
+  if (!v) return null;
+  if (v instanceof Date) return v.toISOString();
+  const m = String(v).match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?\s*m\.?)?)?/i);
+  if (m) { let hh = Number(m[4] || 0); if (m[7] && /p/i.test(m[7]) && hh < 12) hh += 12; if (m[7] && /a/i.test(m[7]) && hh === 12) hh = 0;
+    return new Date(Number(m[3]), Number(m[2]) - 1, Number(m[1]), hh, Number(m[5] || 0), Number(m[6] || 0)).toISOString(); }
+  const d = new Date(v); return isNaN(d) ? null : d.toISOString();
+}
+
+// --- Las 4 cargas, con exactamente los mismos campos que arma FleetSync ---
+function filasDocumentosFleet_(filas) {
+  return objetosDesdeFilas_(filas, ['Placa', 'Nombre Documento']).map(r => ({
+    placa: txtF_(pick_(r, ['Placa', 'placa'])),
+    documento_persona: txtF_(pick_(r, ['Nro Identificacion', 'Nro Identificación', 'Documento', 'documento_persona'])),
+    nombre_persona: txtF_(pick_(r, ['Nombre', 'nombre_persona'])),
+    tipo_titular: txtF_(pick_(r, ['Tipo', 'tipo_titular'])),
+    nombre_documento: txtF_(pick_(r, ['Nombre Documento', 'nombre_documento'])),
+    inicio_vigencia: fechaF_(pick_(r, ['Inicio Vigencia', 'inicio_vigencia'])),
+    vigente_hasta: fechaF_(pick_(r, ['Vigente Hasta', 'vigente_hasta'])),
+    estado: txtF_(pick_(r, ['Estado', 'estado'])),
+    fecha_cargue: tsF_(pick_(r, ['Fecha - Hora Cargue', 'Fecha Hora Cargue', 'fecha_cargue'])),
+    usuario_cargue: txtF_(pick_(r, ['Usuario', 'usuario_cargue'])),
+    empresa: txtF_(pick_(r, ['Empresa', 'empresa']))
+  })).filter(x => x.placa);
+}
+function filasConductoresFleet_(filas) {
+  return objetosDesdeFilas_(filas, ['Documento', 'Nombres', 'Apellidos']).map(r => ({
+    documento: txtF_(pick_(r, ['Documento', 'documento'])), nombres: txtF_(pick_(r, ['Nombres', 'nombres'])), apellidos: txtF_(pick_(r, ['Apellidos', 'apellidos'])),
+    celular: txtF_(pick_(r, ['Celular', 'celular', 'Telefono'])), correo: txtF_(pick_(r, ['Correo Electronico', 'Correo Electrónico', 'Correo', 'correo'])),
+    licencia_num: txtF_(pick_(r, ['Numero Licencia', 'Número Licencia'])), licencia_cat: txtF_(pick_(r, ['Categoria', 'Categoría'])),
+    licencia_vence: fechaF_(pick_(r, ['Fecha Licencia'])), eps: txtF_(pick_(r, ['Nombre EPS', 'EPS'])), arl: txtF_(pick_(r, ['Entidad ARL', 'ARL'])),
+    tipo_sangre: txtF_(pick_(r, ['Tipo Sangre'])), tel_emergencia: txtF_(pick_(r, ['Tel Emergencia'])), cod_interno: txtF_(pick_(r, ['Cod. Interno', 'Cod Interno'])),
+    placa1: txtF_(pick_(r, ['Placa #1'])), placa2: txtF_(pick_(r, ['Placa #2'])), placa3: txtF_(pick_(r, ['Placa #3'])), placa4: txtF_(pick_(r, ['Placa #4'])), placa5: txtF_(pick_(r, ['Placa #5']))
+  })).filter(x => x.documento);
+}
+function filasCarteraFleet_() {
+  return leerCartera_().map(r => ({
+    placa: r.placa, num_interno: String(r.numInterno || ''), identificacion: String(r.identificacion || ''), nombre_afiliado: r.nombre || '',
+    celular: r.celular || '', correo: r.correo || '', empresa: r.empresa || '', clase_vehiculo: r.clase || '', empresa_convenio: r.empresaConvenio || '',
+    ultimo_periodo_pago: r.ultimoPeriodo || '', periodos_vencidos: String(r.periodosVencidos || 0), valor_vencido: String(Math.round(r.valorVencido || 0)), estado: r.estado || ''
+  })).filter(x => x.placa);
+}
+function filasConsolidadoFleet_() {
+  const h = hoja_('ParqueAutomotor', ENC_PARQUE), n = h.getLastRow() - 1;
+  if (n < 1) return [];
+  const i = c => ENC_PARQUE.indexOf(c);
+  return h.getRange(2, 1, n, ENC_PARQUE.length).getValues().filter(f => f[0] && esActivoParque_(f)).map(f => {
+    const t = c => txtF_(f[i(c)]), d = c => fechaF_(f[i(c)]);
+    return { placa: t('Placa'), num_interno: t('No Interno'), nombre_propietario: t('Nombre Propietario'), documento: t('Documento'), telefono: t('Teléfono'), celular: t('Celular'),
+      email: t('Email'), ciudad: t('Ciudad Vehiculo'), tar_operacion: t('Tar. Operacion #'), vence_operacion: d('Vence T. Operacion'), marca: t('Marca Vehículo'), clase: t('Clase Vehículo'),
+      combustible: t('Tipo Combustible'), carroceria: t('Tipo Carrocería'), pasajeros: t('Pasajeros'), modelo: t('Modelo'), cilindraje: t('Cilindraje'), chasis: t('Chasis'), motor: t('Motor'),
+      soat_num: t('No. SOAT'), soat_entidad: t('Entidad Soat'), soat_fecha: d('Fecha SOAT'), seguros_entidad: t('Entidad Seguros'), seguros_fecha: d('Fecha Seguros'),
+      tecmecanica_fecha: d('Fecha TecMecanica'), preventiva_fecha: d('Fecha Preventiva'), tipo_convenio: t('Tipo Convenio'), empresa_convenio: t('Empresa Convenio'),
+      estado: t('Estado'), estado_vehiculo: t('Estado Vehículo'), empresa: t('Empresa') };
+  });
+}
+
+// Descarga un reporte del portal, lo guarda en Drive (carpeta FleetSync) y devuelve sus filas
+function descargarReporteFleet_(ruta, base) {
+  const blob = descargarReportes_(ruta, false, [], base)[0];
+  const carpeta = subcarpeta_(carpetaImportar_(), 'FleetSync');
+  const f = carpeta.createFile(blob).setName(base + '_' + Utilities.formatDate(new Date(), CONFIG.ZONA, 'yyyy-MM-dd_HHmm') + '.xlsx');
+  return { nombre: f.getName(), filas: leerFilasArchivo_(f) };
+}
+function registrarFleet_(tipo, filas, resultado, error) {
+  hoja_('FleetSync', ['Fecha', 'Cargue', 'Filas enviadas', 'Resultado', 'Error']).appendRow([new Date(), tipo, filas, resultado ? JSON.stringify(resultado).slice(0, 500) : '', error || '']);
+}
+
+/**
+ * Envia a FleetSync lo que haya cambiado. forzar = true: envia los 4 cargues ya.
+ * Cartera y consolidado salen de la hoja (ya descargados del portal); conductores y
+ * documentos se descargan del portal en las horas de CONFIG.HORAS_PORTAL.
+ */
+function sincronizarFleetSync(forzar) {
+  if (!fleetConfigurado_()) return { omitido: 'Falta FLEET_USUARIO / FLEET_CLAVE en Propiedades del script' };
+  const props = PropertiesService.getScriptProperties();
+  const res = { errores: [] };
+  const token = loginFleet_();
+  const paso = (tipo, fn) => { try { const r = fn(); if (r) res[tipo] = r; } catch (e) { res.errores.push(tipo + ': ' + e.message); registrarFleet_(tipo, 0, null, e.message); } };
+  // 1) Cartera (cuando cambia)
+  paso('cartera', () => {
+    const marca = props.getProperty('CARTERA_CARGA') || '';
+    if (!forzar && (!marca || props.getProperty('FLEET_CARTERA') === marca)) return null;
+    const filas = filasCarteraFleet_(); if (!filas.length) return null;
+    const r = rpcFleet_(token, 'importar_cartera', 'Automatico ' + (props.getProperty('CARTERA_ARCHIVO') || 'CarteraRodamientos'), filas);
+    props.setProperty('FLEET_CARTERA', marca); registrarFleet_('Cartera', filas.length, r); return r;
+  });
+  // 2) Consolidado del parque automotor, solo activos (cuando cambia)
+  paso('consolidado', () => {
+    const marca = props.getProperty('PARQUE_CARGA') || '';
+    if (!forzar && (!marca || props.getProperty('FLEET_PARQUE') === marca)) return null;
+    const filas = filasConsolidadoFleet_(); if (!filas.length) return null;
+    const r = rpcFleet_(token, 'importar_consolidado', 'Automatico Consolidado ' + hoyISO_(), filas);
+    props.setProperty('FLEET_PARQUE', marca); registrarFleet_('Consolidado', filas.length, r); return r;
+  });
+  // 3 y 4) Conductores y base de documentos: se descargan del portal en las horas programadas
+  const hora = Number(Utilities.formatDate(new Date(), CONFIG.ZONA, 'H')), clave = hoyISO_() + '-' + hora;
+  const toca = forzar || (CONFIG.HORAS_PORTAL.indexOf(hora) >= 0 && props.getProperty('FLEET_PORTAL') !== clave);
+  if (toca && props.getProperty('PORTAL_USUARIO')) {
+    paso('conductores', () => {
+      const d = descargarReporteFleet_(CONFIG.PORTAL_CONDUCTORES, 'ConductoresInfoGral');
+      const filas = filasConductoresFleet_(d.filas); if (!filas.length) throw new Error('el reporte de conductores llegó sin filas (' + d.nombre + ')');
+      const r = rpcFleet_(token, 'importar_conductores', 'Automatico ' + d.nombre, filas); registrarFleet_('Conductores', filas.length, r); return r;
+    });
+    paso('documentos', () => {
+      const d = descargarReporteFleet_(CONFIG.PORTAL_DOCUMENTOS, 'DocumentosAfiliados');
+      const filas = filasDocumentosFleet_(d.filas); if (!filas.length) throw new Error('el reporte de documentos llegó sin filas (' + d.nombre + ')');
+      const r = rpcFleet_(token, 'importar_cargue', 'Automatico ' + d.nombre, filas); registrarFleet_('Documentos afiliados', filas.length, r); return r;
+    });
+    props.setProperty('FLEET_PORTAL', clave);
+  }
+  props.setProperty('FLEET_ULTIMA', new Date().toISOString());
+  if (res.errores.length) props.setProperty('FLEET_ERROR', res.errores.join(' / ')); else props.deleteProperty('FLEET_ERROR');
+  console.log('FleetSync: ' + JSON.stringify(res));
+  return res;
+}
+/** Lo ejecuta su propio disparador horario. */
+function sincronizarFleetAutomatica() {
+  try { sincronizarFleetSync(false); }
+  catch (e) { console.error('FleetSync', e); PropertiesService.getScriptProperties().setProperty('FLEET_ERROR', e.message); }
+}
+/** Prueba manual (desde el editor): envia los 4 cargues ya y muestra el resultado. */
+function probarFleetSync() { console.log(JSON.stringify(sincronizarFleetSync(true), null, 1)); }
+function diagnosticarPortalConductores() { diagnosticarPortal(CONFIG.PORTAL_CONDUCTORES); }
+function diagnosticarPortalDocumentos() { diagnosticarPortal(CONFIG.PORTAL_DOCUMENTOS); }
 
 // ===================== CALENDARIOS =====================
 function calendario_() {
@@ -1156,9 +1350,9 @@ function avisarError_(que, e) {
 function asegurarDisparador_() {
   try {
     const props = PropertiesService.getScriptProperties();
-    const clave = 'DISPARADORES_V2_' + CONFIG.HORA_INFORME;
+    const clave = 'DISPARADORES_V3_' + CONFIG.HORA_INFORME;
     const tr = ScriptApp.getProjectTriggers().map(t => t.getHandlerFunction());
-    if (props.getProperty(clave) && tr.indexOf('informeDiarioAutomatico') >= 0 && tr.indexOf('importarCarteraAutomatica') >= 0) return true;
+    if (props.getProperty(clave) && ['informeDiarioAutomatico', 'importarCarteraAutomatica', 'sincronizarFleetAutomatica'].every(f => tr.indexOf(f) >= 0)) return true;
     instalarDisparadores();
     props.setProperty(clave, new Date().toISOString());
     return true;
@@ -1167,9 +1361,10 @@ function asegurarDisparador_() {
 
 /** (Opcional) instala o reinstala el envio automatico diario. El Web App ya lo hace solo. */
 function instalarDisparadores() {
-  ScriptApp.getProjectTriggers().filter(t => ['informeDiarioAutomatico', 'importarCarteraAutomatica'].indexOf(t.getHandlerFunction()) >= 0).forEach(t => ScriptApp.deleteTrigger(t));
+  ScriptApp.getProjectTriggers().filter(t => ['informeDiarioAutomatico', 'importarCarteraAutomatica', 'sincronizarFleetAutomatica'].indexOf(t.getHandlerFunction()) >= 0).forEach(t => ScriptApp.deleteTrigger(t));
   ScriptApp.newTrigger('informeDiarioAutomatico').timeBased().everyDays(1).atHour(CONFIG.HORA_INFORME).inTimezone(CONFIG.ZONA).create();
   ScriptApp.newTrigger('importarCarteraAutomatica').timeBased().everyHours(1).create();
+  ScriptApp.newTrigger('sincronizarFleetAutomatica').timeBased().everyHours(1).create(); // FleetSync en su propia ejecucion
   carpetaImportar_();
   libro_(); // crea la hoja si no existe
   return 'Disparador diario instalado a las ' + CONFIG.HORA_INFORME + ':00 (' + CONFIG.ZONA + '). Hoja: ' + libro_().getUrl();
@@ -1188,6 +1383,8 @@ function configurarTodo() {
   if (!props.getProperty('PORTAL_USUARIO')) console.warn('Falta PORTAL_USUARIO / PORTAL_CLAVE en Propiedades del script: la descarga del portal queda desactivada.');
   console.log('Importacion: ' + JSON.stringify(importarCarteraAutomatica(true)));
   tocarVersion_();
+  if (!props.getProperty('FLEET_USUARIO')) console.warn('Falta FLEET_USUARIO / FLEET_CLAVE (usuario admin o jefe de FleetSync): el cargue automático en FleetSync queda desactivado.');
+  else console.log('Para probar FleetSync ya mismo ejecuta probarFleetSync (puede tardar unos minutos).');
 }
 
 /**
