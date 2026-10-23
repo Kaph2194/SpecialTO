@@ -661,6 +661,10 @@ function intentosDescarga_(html, pagina, ruta, extra, sinRespaldo) {
       datos[c.nombre] = c.valor;
       if (/fecha|corte/i.test(c.nombre) && !c.valor) datos[c.nombre] = hoyCO_();
     });
+    // Estado del vehiculo (radios Activos/Inactivos/Todos): la opcion marcada por defecto es "Activos";
+    // si el campo oculto del estado esta vacio, se llena con la opcion elegida (lo hace el JS del portal)
+    const radioEstado = Object.keys(datos).filter(k => /estado/i.test(k) && f.campos.some(c => c.tipo === 'radio' && c.nombre === k))[0];
+    if (radioEstado) f.campos.filter(c => c.tipo === 'hidden' && /estado/i.test(c.nombre || '') && !c.valor).forEach(c => datos[c.nombre] = datos[radioEstado]);
     const filtros = CONFIG.PORTAL_FILTROS[ruta] || {};
     Object.keys(filtros).forEach(k => f.campos.filter(c => c.tipo === 'select' && new RegExp(k, 'i').test(c.nombre || '')).forEach(c => {
       const o = (c.opciones || []).filter(o => normalizar_(o.texto) === normalizar_(filtros[k]))[0] || (c.opciones || []).filter(o => normalizar_(o.texto).indexOf(normalizar_(filtros[k]).slice(0, 5)) === 0)[0];
@@ -816,6 +820,14 @@ function parsearParque_(filas) {
   }
   return { empresa: empresa, filas: out };
 }
+// Solo vehiculos ACTIVOS en el consolidado: columna Estado (sin titulo en el reporte) y/o
+// "Estado Vehículo". Sin dato de estado se conserva; Inactivo/Retirado/Desvinculado se descarta.
+function esActivoParque_(f) {
+  const est = [f[ENC_PARQUE.indexOf('Estado')], f[ENC_PARQUE.indexOf('Estado Vehículo')]].map(normalizar_).filter(String);
+  if (!est.length) return true;
+  if (est.some(e => /^(inactiv|retir|desvinc|bloque|suspend)/.test(e))) return false;
+  return est.some(e => e === 'activo' || e === 'activos');
+}
 // tablas: [{filas:[[...37 columnas ENC_PARQUE...]]}] o desde la app: [{encabezados:[...], filas:[[...]]}]
 function guardarParque_(tablas, origen) {
   const lock = LockService.getScriptLock(); lock.waitLock(30000);
@@ -824,28 +836,33 @@ function guardarParque_(tablas, origen) {
     const n = h.getLastRow() - 1;
     let actuales = n > 0 ? h.getRange(2, 1, n, ENC_PARQUE.length).getValues() : [];
     const iEmp = ENC_PARQUE.indexOf('Empresa'), ahora = new Date();
-    const nuevas = [], empresas = {};
+    const nuevas = [], empresas = {}; let inactivos = 0;
     tablas.forEach(t => {
       let filas = t.filas || [];
       if (t.encabezados) { // viene de la app: reordenar por nombre de columna
         const pos = {}; t.encabezados.forEach((e, j) => pos[normalizar_(e)] = j);
         filas = filas.map(f => ENC_PARQUE.slice(0, 37).map(e => { const j = pos[normalizar_(e)]; return j === undefined ? '' : (f[j] === null || f[j] === undefined ? '' : f[j]); }));
       }
-      filas.forEach(f => { const e = String(f[iEmp] || '').trim() || 'SIN EMPRESA'; f[iEmp] = e; empresas[e] = (empresas[e] || 0) + 1; nuevas.push(f.slice(0, 37).concat([ahora, origen])); });
+      filas.forEach(f => {
+        const e = String(f[iEmp] || '').trim() || 'SIN EMPRESA'; f[iEmp] = e;
+        if (!(e in empresas)) empresas[e] = 0;
+        if (!esActivoParque_(f)) { inactivos++; return; }
+        empresas[e]++; nuevas.push(f.slice(0, 37).concat([ahora, origen]));
+      });
     });
-    if (!nuevas.length) throw new Error('No llegaron vehículos');
+    if (!nuevas.length) throw new Error(inactivos ? 'Todos los vehículos recibidos están inactivos' : 'No llegaron vehículos');
     // reemplaza solo las empresas recibidas; si una placa cambio de empresa, queda la nueva
     const placasNuevas = {}; nuevas.forEach(f => placasNuevas[String(f[0]).toUpperCase()] = 1);
-    actuales = actuales.filter(f => f[0] && !(String(f[iEmp]).trim() in empresas) && !placasNuevas[String(f[0]).toUpperCase()]);
+    actuales = actuales.filter(f => f[0] && esActivoParque_(f) && !(String(f[iEmp]).trim() in empresas) && !placasNuevas[String(f[0]).toUpperCase()]);
     const todas = actuales.concat(nuevas).sort((a, b) => String(a[iEmp]).localeCompare(String(b[iEmp])) || String(a[0]).localeCompare(String(b[0])));
     if (n > 0) h.getRange(2, 1, n, ENC_PARQUE.length).clearContent();
     h.getRange(2, 1, todas.length, ENC_PARQUE.length).setValues(todas);
     FECHAS_PARQUE.forEach(c => h.getRange(2, ENC_PARQUE.indexOf(c) + 1, todas.length, 1).setNumberFormat('yyyy-mm-dd'));
     const props = PropertiesService.getScriptProperties();
     props.setProperties({ PARQUE_CARGA: ahora.toISOString(), PARQUE_ORIGEN: origen, PARQUE_VERSION: String(Date.now()) });
-    hoja_('HistoricoParque', ['Fecha', 'Origen', 'Empresas actualizadas', 'Vehículos recibidos', 'Total consolidado'])
-      .appendRow([ahora, origen, Object.keys(empresas).map(e => e + ' (' + empresas[e] + ')').join(', '), nuevas.length, todas.length]);
-    return { ok: true, empresas: empresas, recibidos: nuevas.length, total: todas.length };
+    hoja_('HistoricoParque', ['Fecha', 'Origen', 'Empresas actualizadas', 'Vehículos activos recibidos', 'Total consolidado', 'Inactivos descartados'])
+      .appendRow([ahora, origen, Object.keys(empresas).map(e => e + ' (' + empresas[e] + ')').join(', '), nuevas.length, todas.length, inactivos]);
+    return { ok: true, empresas: empresas, recibidos: nuevas.length, total: todas.length, inactivosDescartados: inactivos };
   } finally { lock.releaseLock(); }
 }
 function obtenerParque_(p) {
@@ -858,7 +875,7 @@ function obtenerParque_(p) {
   const iAct = ENC_PARQUE.indexOf('Actualizado'), iEmp = ENC_PARQUE.indexOf('Empresa');
   const filas = [], empresas = {};
   if (n > 0) h.getRange(2, 1, n, ENC_PARQUE.length).getValues().forEach(f => {
-    if (!f[0]) return;
+    if (!f[0] || !esActivoParque_(f)) return;
     filas.push(cols.map(j => (FECHAS_PARQUE.indexOf(ENC_PARQUE[j]) >= 0 || f[j] instanceof Date) ? isoCelda_(f[j]) : f[j]));
     const e = f[iEmp]; const act = f[iAct] instanceof Date ? f[iAct].toISOString() : String(f[iAct] || '');
     if (!empresas[e]) empresas[e] = { actualizado: act, vehiculos: 0 };

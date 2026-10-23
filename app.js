@@ -315,7 +315,7 @@ function guardarRegistro(){
   const datos={placa,numInterno:document.getElementById('f_numInterno').value.trim(),identificacion:document.getElementById('f_identificacion').value.trim(),nombre:document.getElementById('f_nombre').value.trim(),empresa:document.getElementById('f_empresa').value.trim(),soat:document.getElementById('f_soat').value||null,seguros:document.getElementById('f_seguros').value||null,tarOperacion:document.getElementById('f_tarOperacion').value||null,tecnicomecanica:document.getElementById('f_tecnicomecanica').value||null,fechaPagoTO:document.getElementById('f_fechaPagoTO').value||null,fechaDocsCompletosTO:document.getElementById('f_fechaDocsCompletosTO').value||null,fechaRadicadoRUNT:document.getElementById('f_fechaRadicadoRUNT').value||null};
   const idx=vehiculos.findIndex(x=>x.placa===placa);
   if(idx>=0){Object.assign(vehiculos[idx],datos);mostrarToast('Registro actualizado','success');}
-  else{vehiculos.push({...plantillaVacia(),id:nuevoId(),...datos});mostrarToast('Vehiculo agregado','success');}
+  else{vehiculos.push({...plantillaVacia(),id:nuevoId(),manual:true,...datos});mostrarToast('Vehiculo agregado','success');}
   guardarLS();cerrarModal();
   if(vistaActual==='dashboard')renderDashboard();else renderTabla();
 }
@@ -470,7 +470,7 @@ async function sincronizarLote(lista){
 
 // ===== LOCAL STORAGE =====
 function datosBaseVehiculo(v){
-  return {id:v.id,placa:v.placa,numInterno:v.numInterno,identificacion:v.identificacion,nombre:v.nombre,empresa:v.empresa,soat:v.soat,seguros:v.seguros,tarOperacion:v.tarOperacion,tecnicomecanica:v.tecnicomecanica,preventiva:v.preventiva,fechaRenovSoat:v.fechaRenovSoat,fechaRenovSeguros:v.fechaRenovSeguros,fechaPagoTO:v.fechaPagoTO,fechaDocsCompletosTO:v.fechaDocsCompletosTO,fechaRadicadoRUNT:v.fechaRadicadoRUNT,fechaRenovTecno:v.fechaRenovTecno,observacionTO:v.observacionTO};
+  return {id:v.id,manual:v.manual||undefined,placa:v.placa,numInterno:v.numInterno,identificacion:v.identificacion,nombre:v.nombre,empresa:v.empresa,soat:v.soat,seguros:v.seguros,tarOperacion:v.tarOperacion,tecnicomecanica:v.tecnicomecanica,preventiva:v.preventiva,fechaRenovSoat:v.fechaRenovSoat,fechaRenovSeguros:v.fechaRenovSeguros,fechaPagoTO:v.fechaPagoTO,fechaDocsCompletosTO:v.fechaDocsCompletosTO,fechaRadicadoRUNT:v.fechaRadicadoRUNT,fechaRenovTecno:v.fechaRenovTecno,observacionTO:v.observacionTO};
 }
 function datosConComprobantes(v){
   return {...datosBaseVehiculo(v),comprobanteSoat:v.comprobanteSoat,comprobanteSeguros:v.comprobanteSeguros,comprobanteTO:v.comprobanteTO,comprobanteTecno:v.comprobanteTecno,comprobantePrev:v.comprobantePrev};
