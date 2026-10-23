@@ -43,7 +43,7 @@ La app ya trae fija la URL del backend, así que **cualquier navegador** muestra
 
 | Qué | Cuándo |
 |---|---|
-| Descarga de cartera y parque automotor (todas las empresas) del portal SGT y carga en la app; conductores y documentos de afiliados hacia FleetSync | 6:00, 12:00 y 17:00 (`CONFIG.HORAS_PORTAL`), y antes del informe de las 7:00 |
+| Descarga de cartera y parque automotor (todas las empresas) del portal SGT y carga en la app | 6:00, 12:00 y 17:00 (`CONFIG.HORAS_PORTAL`), y antes del informe de las 7:00 |
 | Carga de reportes que lleguen como adjunto al correo de juridico@ | Cada hora |
 | Carga de cualquier Excel que se guarde en la carpeta de Drive **“SpecialCar Cartera - Cargar aqui”** | Cada hora |
 | Botón **🔄 Actualizar desde el portal** en la app | Cuando se pulse |
@@ -66,27 +66,9 @@ El CONSOLIDADO ya no hay que armarlo a mano:
 
 Si la descarga del parque automotor falla, ejecutar **`diagnosticarPortalParque`** y compartir el registro, o poner las URLs exactas de descarga (una por empresa) en `CONFIG.PORTAL_PARQUE_URLS`. Si la ruta del reporte en el portal no es `/Reportes/ParqueAutomotor`, cambiarla en `CONFIG.PORTAL_PARQUE`.
 
-### FleetSync (DisponibilidadOP): cargue automático
+### FleetSync (DisponibilidadOP)
 
-Los mismos reportes del portal alimentan **FleetSync** (repositorio `DisponibilidadOP`, base de datos Supabase) sin que nadie suba archivos. El backend hace los **4 cargues del administrador de FleetSync**:
-
-| Cargue en FleetSync | Origen | Cuándo |
-|---|---|---|
-| Base de documentos (`importar_cargue`) | Portal → *Documentos Afiliados* (Estado = Activos, Detallado, Tipo documento = Todos) | 6, 12 y 17 h |
-| Conductores (`importar_conductores`) | Portal → *Conductores Gral* (Estado = Activos) | 6, 12 y 17 h |
-| Cartera (`importar_cartera`) | La cartera ya descargada del portal | Cada vez que cambia |
-| Consolidado (`importar_consolidado`) | El consolidado del parque automotor (**solo activos**) | Cada vez que cambia |
-
-**Activarlo (una vez):**
-1. En FleetSync, el jefe de operación crea en **Equipo** un usuario para la integración (por ejemplo `integracion@specialcar.com.co`) con rol **Administrador** (o Jefe).
-2. En Apps Script (juridico@) → ⚙️ **Propiedades del script** → agregar `FLEET_USUARIO` y `FLEET_CLAVE` con ese usuario.
-3. Pegar el `Cartera.gs` nuevo, ejecutar **`configurarTodo`** (instala el disparador de FleetSync) y luego **`probarFleetSync`** para enviar los 4 cargues ya.
-4. **Nueva versión** de la implementación.
-
-- Corre en su **propio disparador horario** (Google limita cada ejecución a 6 minutos).
-- Cada envío queda en la pestaña **FleetSync** de la hoja (fecha, cargue, filas, resultado o error) y los archivos descargados en la subcarpeta **FleetSync** de la carpeta de carga en Drive.
-- Si la descarga de esos reportes falla: `diagnosticarPortalConductores` / `diagnosticarPortalDocumentos`.
-- Los Excel **no se suben al repositorio de GitHub** (es público y contienen datos personales); FleetSync lee de su base de datos, no de archivos del repositorio.
+FleetSync es un sistema aparte: tiene su propio proceso automático (repositorio `DisponibilidadOP`, carpeta `apps-script/`, con la cuenta directortransporte@). Este proyecto de cartera **no** envía nada a FleetSync. Si en este proyecto quedaron las propiedades `FLEET_USUARIO` / `FLEET_CLAVE` de una versión anterior, se pueden borrar.
 
 ### Gestiones de cobro por placa (trazabilidad)
 
