@@ -33,9 +33,12 @@ function leerTablaParque(filas){
   const tieneEmpresa=enc.some(h=>_norm(h)==='empresa');
   if(!tieneEmpresa) enc.push('Empresa');
   const iPlaca=enc.findIndex(h=>_norm(h)==='placa');
-  const out=[];
+  // solo vehiculos ACTIVOS (columna Estado y/o "Estado Vehículo")
+  const iEst=enc.map((h,j)=>['estado','estado vehiculo'].includes(_norm(h))?j:-1).filter(j=>j>=0);
+  const out=[]; let inactivos=0;
   for(let i=hIdx+1;i<filas.length;i++){
     const f=filas[i]; if(!String(f[iPlaca]||'').trim()) continue;
+    if(!esActivoFila(iEst.map(j=>f[j]))){ inactivos++; continue; }
     const fila=enc.map((h,j)=>{
       if(!tieneEmpresa&&j===enc.length-1) return empresa;
       const v=f[j];
@@ -45,7 +48,24 @@ function leerTablaParque(filas){
     fila[iPlaca]=String(fila[iPlaca]).trim().toUpperCase();
     out.push(fila);
   }
-  return {empresa, encabezados:enc, filas:out};
+  return {empresa, encabezados:enc, filas:out, inactivos};
+}
+function esActivoFila(estados){
+  const e=estados.map(_norm).filter(Boolean);
+  if(!e.length) return true;
+  if(e.some(x=>/^(inactiv|retir|desvinc|bloque|suspend)/.test(x))) return false;
+  return e.some(x=>x==='activo'||x==='activos');
+}
+// Quita de la vista los vehiculos que no estan activos en el consolidado (los creados a
+// mano con "Agregar Vehiculo" se conservan). empresas: limitar a esas empresas (carga parcial).
+let _placasManuales=new Set();
+function depurarVehiculosInactivos(activos, empresas){
+  const antes=vehiculos.length;
+  vehiculos=vehiculos.filter(v=>activos.has(v.placa)||v.manual||_placasManuales.has(v.placa)||(empresas&&!empresas.has(v.empresa)));
+  vehiculos.forEach((v,i)=>{ v.id=i; });
+  _placasParque=new Set(activos);
+  try{ if(!empresas) localStorage.setItem('sc_parque_activos',JSON.stringify([...activos])); }catch(e){}
+  return antes-vehiculos.length;
 }
 
 // Aplica una tabla (encabezados + filas) sobre los vehiculos: actualiza SOLO las
@@ -91,11 +111,14 @@ async function procesarArchivosVencimientos(files){
   let act=0, cre=0;
   tablas.forEach(t=>{ const r=aplicarTablaVencimientos(t.encabezados,t.filas); act+=r.actualizados; cre+=r.creados; });
   const empresas=[...new Set(tablas.flatMap(t=>{ const i=t.encabezados.findIndex(h=>_norm(h)==='empresa'); return t.filas.map(f=>f[i]); }).filter(Boolean))];
+  const inactivosArchivo=tablas.reduce((s,t)=>s+(t.inactivos||0),0);
+  const activosArchivo=new Set(tablas.flatMap(t=>{ const i=t.encabezados.findIndex(h=>_norm(h)==='placa'); return t.filas.map(f=>String(f[i]).toUpperCase()); }));
+  const quitados=depurarVehiculosInactivos(activosArchivo,new Set(empresas));
   guardarLS();
   guardarUltimaActualizacion(tablas.length>1?`${tablas.length} archivos (${empresas.length} empresas)`:tablas[0].archivo, act+cre);
   recargarEmpresasFiltro();
   if(vistaActual==='dashboard') renderDashboard(); else if(vistaActual==='tabla') renderTabla();
-  mostrarToast(`Consolidado: ${act} actualizados, ${cre} nuevos · ${empresas.length} empresa(s)${errores.length?` · ${errores.length} archivo(s) con error`:''}`,errores.length?'error':'success');
+  mostrarToast(`Consolidado (solo activos): ${act} actualizados, ${cre} nuevos · ${empresas.length} empresa(s)${inactivosArchivo?` · ${inactivosArchivo} inactivos descartados`:''}${quitados?` · ${quitados} ya no activos ocultados`:''}${errores.length?` · ${errores.length} archivo(s) con error`:''}`,errores.length?'error':'success');
 
   // 1) Consolidado compartido (hoja de juridico@) para que todos los navegadores lo vean
   if(typeof CARTERA_BACKEND_ACTIVO!=='undefined'&&CARTERA_BACKEND_ACTIVO){
@@ -147,7 +170,7 @@ async function enviarCambiosGestion(extra){
     const j=JSON.stringify(gestionDe(v));
     if(j!==(_gestionSnapshot[v.placa]||'{}')&&!cambios.some(c=>c.placa===v.placa)){
       const c={placa:v.placa,campos:gestionDe(v),usuario:CARTERA_CORREOS.cartera};
-      if(!_placasParque.has(v.placa)){ c.campos.base={}; CAMPOS_BASE_VEH.forEach(k=>c.campos.base[k]=v[k]); } // vehiculo creado a mano
+      if(v.manual){ c.campos.base={}; CAMPOS_BASE_VEH.forEach(k=>c.campos.base[k]=v[k]); } // vehiculo creado a mano
       cambios.push(c);
     }
   });
@@ -176,9 +199,15 @@ async function sincronizarParque(forzar){
       if(r.sinCambios) return;
       _parqueVersion=r.version;
       _parqueInfo={cargado:r.cargado,origen:r.origen,empresas:r.empresas||{}};
-      if(r.filas&&r.filas.length) aplicarTablaVencimientos(r.encabezados,r.filas);
-      const subir=[];
       const gestion=r.gestion||{};
+      _placasManuales=new Set(Object.entries(gestion).filter(([p,g])=>g&&g.base).map(([p])=>p));
+      let quitados=0;
+      if(r.filas&&r.filas.length){
+        aplicarTablaVencimientos(r.encabezados,r.filas);
+        const iP=r.encabezados.indexOf('Placa');
+        quitados=depurarVehiculosInactivos(new Set(r.filas.map(f=>String(f[iP]).toUpperCase())));
+      }
+      const subir=[];
       Object.entries(gestion).forEach(([placa,g])=>{
         if(_gestionPendientes.has(placa)) return;
         let v=vehiculos.find(x=>x.placa===placa);
@@ -203,6 +232,7 @@ async function sincronizarParque(forzar){
       tomarSnapshotGestion();
       if(subir.length) enviarCambiosGestion(subir);
       recargarEmpresasFiltro(); mostrarInfoParque(); refrescarVistaVencimientos();
+      if(quitados) mostrarToast(`${quitados} vehículo(s) inactivos o que ya no están en el consolidado se ocultaron de vencimientos`,'info');
       // calendario de T.O.: una vez por cada consolidado nuevo
       const claveCal='sc_parque_cal_'+(r.cargado||'');
       try{ if(r.cargado&&!localStorage.getItem(claveCal)){ localStorage.setItem(claveCal,'1'); sincronizarCalendarioTO(); } }catch(e){}
@@ -231,6 +261,7 @@ async function actualizarTodoDesdePortal(){
 }
 
 document.addEventListener('DOMContentLoaded',()=>{
+  try{ const a=JSON.parse(localStorage.getItem('sc_parque_activos')||'null'); if(Array.isArray(a)&&a.length){ depurarVehiculosInactivos(new Set(a)); recargarEmpresasFiltro(); refrescarVistaVencimientos(); } }catch(e){}
   vehiculos.forEach(v=>_placasParque.add(v.placa));
   tomarSnapshotGestion();
   sincronizarParque(true);
